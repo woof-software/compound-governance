@@ -15,9 +15,10 @@ import {GovernorPreventLateQuorumUpgradeable} from "contracts/extensions/Governo
 import {IComp} from "contracts/interfaces/IComp.sol";
 import {GovernorAlphaInterface} from "contracts/GovernorBravoInterfaces.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /// @title CompoundGovernor
-/// @author [ScopeLift](https://scopelift.co)
+/// @author WOOF! Software
 /// @notice A governance contract for the Compound DAO.
 /// @custom:security-contact security@compound.finance
 contract CompoundGovernor is
@@ -30,6 +31,9 @@ contract CompoundGovernor is
     GovernorSettableFixedQuorumUpgradeable,
     GovernorSequentialProposalIdUpgradeable
 {
+    /// @dev To use the `EnumerableSet` library for managing a set of addresses.
+    using EnumerableSet for EnumerableSet.AddressSet;
+
     /// @notice Emitted when the expiration of a whitelisted account is set or updated.
     /// @param account The address of the account being whitelisted.
     /// @param expiration The timestamp until which the account is whitelisted.
@@ -88,6 +92,10 @@ contract CompoundGovernor is
 
     /// @notice Stores the latest proposal ID for each proposer.
     mapping(address proposer => uint256 latestProposalId) public latestProposalIds;
+
+    /// @notice A set of addresses that are permanently whitelisted.
+    /// @dev Permanently whitelisted addresses do not have an expiration and are always considered whitelisted.
+    EnumerableSet.AddressSet private permanentWhitelist;
 
     /// @notice Disables the initialize function.
     constructor() {
@@ -175,15 +183,8 @@ contract CompoundGovernor is
             revert GovernorRestrictedProposer(_proposer);
         }
 
-        if (!isWhitelisted(_proposer)) {
-            // check proposal threshold
-            uint256 _votesThreshold = proposalThreshold();
-            if (_votesThreshold > 0) {
-                uint256 _proposerVotes = getVotes(_proposer, clock() - 1);
-                if (_proposerVotes < _votesThreshold) {
-                    revert GovernorInsufficientProposerVotes(_proposer, _proposerVotes, _votesThreshold);
-                }
-            }
+        if (!isWhitelisted(_proposer) || !isWhitelistedPermanently(_proposer)) {
+            revert GovernorNotWhitelisted(_proposer);
         }
 
         return _propose(_targets, _values, _calldatas, _description, _proposer);
@@ -286,6 +287,10 @@ contract CompoundGovernor is
         emit WhitelistAccountExpirationSet(_account, _expiration);
     }
 
+    function setPermanentWhitelist(address _account, bool _status) external {
+        _status ? permanentWhitelist.add(_account) : permanentWhitelist.remove(_account);
+    }
+
     /// @notice Checks if an account is currently whitelisted.
     /// @notice Only a `whitelistGuardian` can cancel a whitelisted account's proposal for falling below
     /// `proposalThreshold`.
@@ -295,6 +300,10 @@ contract CompoundGovernor is
     /// @return bool Returns true if the account is whitelisted (expiration is in the future), false otherwise.
     function isWhitelisted(address _account) public view returns (bool) {
         return (whitelistAccountExpirations[_account] > block.timestamp);
+    }
+
+    function isWhitelistedPermanently(address _account) public view returns (bool) {
+        return permanentWhitelist.contains(_account);
     }
 
     /// @notice Sets a new `whitelistGuardian`.

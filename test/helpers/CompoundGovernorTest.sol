@@ -114,6 +114,81 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
         governor.setWhitelistAccountExpiration(_proposer, block.timestamp + 2_000_000);
     }
 
+    function _setWhitelistedProposerViaAllowedProposer(address _proposer) public {
+        address[] memory _allowedProposers = governor.getAllowedProposers();
+        require(_allowedProposers.length > 0, "No allowed proposers");
+
+        // Skip if the proposer is already an allowed proposer (can't whitelist allowed proposers)
+        if (governor.isAllowedProposer(_proposer)) {
+            return;
+        }
+
+        address _allowedProposer = _allowedProposers[0]; // Get first allowed proposer
+        vm.prank(_allowedProposer);
+        governor.setWhitelistAccountExpiration(_proposer, block.timestamp + 2_000_000);
+    }
+
+    function _addToAllowedProposers(address _proposer) public {
+        // Check if proposer is already in the allowed list
+        if (governor.isAllowedProposer(_proposer)) {
+            return; // Already in the list, nothing to do
+        }
+
+        // Need to first add a major delegate to allowed proposers if none exist
+        address[] memory _currentAllowed = governor.getAllowedProposers();
+        if (_currentAllowed.length == 0) {
+            // Bootstrap: directly add a major delegate through timelock
+            vm.prank(TIMELOCK_ADDRESS);
+            governor.addProposer(_majorDelegates[0]);
+            _currentAllowed = governor.getAllowedProposers();
+        }
+
+        // If the proposer we want to add is already bootstrapped, use direct timelock addition
+        // to avoid governance proposal complexity
+        if (_proposer == _majorDelegates[0]) {
+            return; // Already added in bootstrap
+        }
+
+        // For any other proposer, we can add them directly through timelock for testing purposes
+        // This avoids the complexity of governance proposals in test helpers
+        vm.prank(TIMELOCK_ADDRESS);
+        governor.addProposer(_proposer);
+    }
+
+    function _removeFromAllowedProposers(address _proposer) public {
+        address[] memory _currentAllowed = governor.getAllowedProposers();
+        require(_currentAllowed.length > 0, "No allowed proposers");
+
+        Proposal memory _proposal = _buildRemoveProposerProposal(_proposer);
+        _submitPassQueueAndExecuteProposal(_currentAllowed[0], _proposal);
+    }
+
+    function _buildAddProposerProposal(address _proposer) internal view returns (Proposal memory _proposal) {
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(CompoundGovernor.addProposer.selector, _proposer);
+
+        _proposal = Proposal(_targets, _values, _calldatas, "Add Proposer to Allowed List");
+    }
+
+    function _buildRemoveProposerProposal(address _proposer) internal view returns (Proposal memory _proposal) {
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(CompoundGovernor.removeProposer.selector, _proposer);
+
+        _proposal = Proposal(_targets, _values, _calldatas, "Remove Proposer from Allowed List");
+    }
+
     function _submitProposal(Proposal memory _proposal) public returns (uint256 _proposalId) {
         vm.prank(_getRandomProposer());
         _proposalId = governor.propose(_proposal.targets, _proposal.values, _proposal.calldatas, _proposal.description);
@@ -220,6 +295,25 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
     {
         uint256 _proposalId = _submitProposal(_proposer, _proposal);
         _passQueueAndExecuteProposal(_proposal, _proposalId);
+        return _proposalId;
+    }
+
+    function _submitPassQueueAndExpectExecutionToRevert(address _proposer, Proposal memory _proposal)
+        public
+        returns (uint256)
+    {
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        _passAndQueueProposal(_proposal, _proposalId);
+
+        // Wait for timelock delay
+        vm.warp(governor.proposalEta(_proposalId) + 1);
+
+        // Now expect the execution to revert
+        vm.expectRevert();
+        governor.execute(
+            _proposal.targets, _proposal.values, _proposal.calldatas, keccak256(bytes(_proposal.description))
+        );
+
         return _proposalId;
     }
 

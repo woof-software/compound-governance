@@ -426,7 +426,8 @@ abstract contract Queue is CompoundGovernorTest {
 contract QueueWithProposalId is Queue {
     function _queueWithProposalDetailsOrId(
         Proposal memory,
-        /* _proposal */ uint256 _proposalId
+        /* _proposal */
+        uint256 _proposalId
     ) internal override {
         governor.queue(_proposalId);
     }
@@ -589,7 +590,8 @@ contract ExecuteWithProposalDetails is Execute {
 contract ExecuteWithProposalId is Execute {
     function _executeWithProposalDetailsOrId(
         Proposal memory,
-        /* _proposal */ uint256 _proposalId
+        /* _proposal */
+        uint256 _proposalId
     ) internal override {
         governor.execute(_proposalId);
     }
@@ -906,7 +908,8 @@ contract CancelWithProposalDetails is Cancel {
 contract CancelWithProposalId is Cancel {
     function _cancelWithProposalDetailsOrId(
         Proposal memory,
-        /* _proposal */ uint256 _proposalId
+        /* _proposal */
+        uint256 _proposalId
     ) internal override {
         governor.cancel(_proposalId);
     }
@@ -1526,6 +1529,110 @@ contract AllowedProposers is CompoundGovernorTest {
             abi.encodeWithSelector(CompoundGovernor.ZeroAddress.selector)
         );
         governor.removeProposer(address(0));
+    }
+
+    function test_ProposalGuardianCanAddProposerWhenBelowMinimum() public {
+        address _newProposer = makeAddr("newProposer");
+
+        // Ensure we have fewer than MIN_PROPOSERS
+        uint256 currentLength = governor.getAllowedProposers().length;
+        assert(currentLength < governor.MIN_PROPOSERS());
+
+        // Proposal guardian should be able to add a proposer
+        vm.prank(proposalGuardian.account);
+        governor.addProposer(_newProposer);
+
+        assertTrue(governor.isAllowedProposer(_newProposer));
+    }
+
+    function test_ProposalGuardianCanAddMultipleProposersWhenBelowMinimum()
+        public
+    {
+        // Add proposers one by one until we reach MIN_PROPOSERS
+        for (uint256 i = 0; i < governor.MIN_PROPOSERS(); i++) {
+            address _newProposer = makeAddr(
+                string(abi.encodePacked("proposer", i))
+            );
+
+            vm.prank(proposalGuardian.account);
+            governor.addProposer(_newProposer);
+
+            assertTrue(governor.isAllowedProposer(_newProposer));
+        }
+
+        // Verify we now have MIN_PROPOSERS
+        assertEq(
+            governor.getAllowedProposers().length,
+            governor.MIN_PROPOSERS()
+        );
+    }
+
+    function test_ProposalGuardianEmitsEventWhenAddingProposer() public {
+        address _newProposer = makeAddr("newProposer");
+
+        vm.prank(proposalGuardian.account);
+        vm.expectEmit();
+        emit CompoundGovernor.ProposerAdded(_newProposer);
+        governor.addProposer(_newProposer);
+    }
+
+    function test_RevertIf_ProposalGuardianTriesToAddProposerWhenAtOrAboveMinimum()
+        public
+    {
+        // First, add enough proposers to reach MIN_PROPOSERS
+        for (uint256 i = 0; i < governor.MIN_PROPOSERS(); i++) {
+            address _newProposer = makeAddr(
+                string(abi.encodePacked("proposer", i))
+            );
+            vm.prank(proposalGuardian.account);
+            governor.addProposer(_newProposer);
+        }
+
+        // Now proposal guardian should not be able to add more
+        address _extraProposer = makeAddr("extraProposer");
+
+        vm.prank(proposalGuardian.account);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.MinProposersReached.selector
+            )
+        );
+        governor.addProposer(_extraProposer);
+    }
+
+    function test_RevertIf_ExpiredProposalGuardianTriesToAddProposer() public {
+        address _newProposer = makeAddr("newProposer");
+
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        vm.prank(proposalGuardian.account);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorOnlyExecutor.selector,
+                proposalGuardian.account
+            )
+        );
+        governor.addProposer(_newProposer);
+    }
+
+    function test_RevertIf_NonProposalGuardianTriesToAddProposerWhenBelowMinimum()
+        public
+    {
+        address _caller = makeAddr("caller");
+        address _newProposer = makeAddr("newProposer");
+
+        vm.assume(_caller != proposalGuardian.account);
+        vm.assume(_caller != TIMELOCK_ADDRESS);
+
+        vm.prank(_caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorOnlyExecutor.selector,
+                _caller
+            )
+        );
+        governor.addProposer(_newProposer);
     }
 }
 

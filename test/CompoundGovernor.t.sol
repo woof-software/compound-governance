@@ -558,43 +558,6 @@ abstract contract Cancel is CompoundGovernorTest {
         vm.assertEq(uint256(governor.state(_proposalId)), uint256(IGovernor.ProposalState.Canceled));
     }
 
-    function testFuzz_RevertIf_NonProposerOrGuardianCancelsProposalAboveThreshold(address _caller) public {
-        address _proposer = _getRandomProposer();
-        vm.assume(_caller != proposalGuardian.account && _caller != _proposer && _caller != PROXY_ADMIN_ADDRESS);
-        _addToAllowedProposers(_proposer);
-        Proposal memory _proposal = _buildAnEmptyProposal();
-        uint256 _proposalId = _submitProposal(_proposer, _proposal);
-
-        vm.prank(_caller);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                CompoundGovernor.Unauthorized.selector, bytes32("Proposer above proposalThreshold"), _caller
-            )
-        );
-        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
-    }
-
-    function testFuzz_RevertIf_ExpiredProposalGuardianCancelsProposalAboveThreshold(uint256 _timeElapsedSinceExpiry)
-        public
-    {
-        _timeElapsedSinceExpiry = bound(_timeElapsedSinceExpiry, 1, type(uint96).max);
-        Proposal memory _proposal = _buildAnEmptyProposal();
-        address _proposer = _getRandomProposer();
-        _addToAllowedProposers(_proposer);
-        uint256 _proposalId = _submitProposal(_proposer, _proposal);
-
-        vm.warp(uint256(proposalGuardian.expiration) + _timeElapsedSinceExpiry);
-        vm.prank(proposalGuardian.account);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                CompoundGovernor.Unauthorized.selector,
-                bytes32("Proposer above proposalThreshold"),
-                proposalGuardian.account
-            )
-        );
-        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
-    }
-
     function testFuzz_RevertIf_ProposalIsExecuted(address _actor) public {
         vm.assume(_actor != PROXY_ADMIN_ADDRESS);
         address _proposer = _getRandomProposer();

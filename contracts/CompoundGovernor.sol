@@ -56,11 +56,6 @@ contract CompoundGovernor is
         uint96 newProposalGuardianExpiry
     );
 
-    /// @notice Emitted when an account's permanent whitelist status is set or updated.
-    /// @param account The address of the account whose permanent whitelist status is being set.
-    /// @param status A boolean indicating whether the account is permanently whitelisted (true) or
-    event PermanentWhitelistSet(address account, bool status);
-
     /// @notice Emitted when a new proposer is added to the allowed proposers list.
     /// @param proposer The address of the proposer that was added.
     event ProposerAdded(address indexed proposer);
@@ -212,20 +207,21 @@ contract CompoundGovernor is
         }
 
         // Check for zero addresses and duplicates
-        for (uint256 i = 0; i < _initProposers.length; i++) {
-            if (_initProposers[i] == address(0)) {
+        for (uint256 i; i < _initProposers.length;) {
+            address proposer = _initProposers[i];
+
+            if (proposer == address(0)) {
                 revert ZeroAddressAtIndex(i);
             }
-
-            // Check for duplicates
-            for (uint256 j = i + 1; j < _initProposers.length; j++) {
-                if (_initProposers[i] == _initProposers[j]) {
-                    revert DuplicateAddress(_initProposers[i]);
-                }
+            if (!allowedProposers.add(proposer)) {
+                revert DuplicateAddress(proposer);
             }
 
-            allowedProposers.add(_initProposers[i]);
-            emit ProposerAdded(_initProposers[i]);
+            emit ProposerAdded(proposer);
+
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -337,12 +333,6 @@ contract CompoundGovernor is
                 || (msg.sender == proposalGuardian.account && block.timestamp <= proposalGuardian.expiration)
         ) {
             return _cancel(_targets, _values, _calldatas, _descriptionHash);
-        }
-
-        // For other cancellation attempts, check proposer's voting power.
-        bool _isProposerAboveThreshold = token().getPriorVotes(_proposer, block.number - 1) >= proposalThreshold();
-        if (_isProposerAboveThreshold) {
-            revert Unauthorized("Proposer above proposalThreshold", msg.sender);
         }
 
         // Whitelist guardian restriction removed for allowed proposers system

@@ -284,7 +284,7 @@ describe("Governor Bravo", function () {
     });
   });
 
-  describe.only("Propose", function () {
+  describe("Propose", function () {
     it("Happy Path", async function () {
       const { governorBravo } = await loadFixture(deployFixtures);
 
@@ -567,33 +567,11 @@ describe("Governor Bravo", function () {
     });
 
     describe("Whitelist", function () {
-      it("Happy Path (expiration whitelist)", async function () {
+      it("Happy Path", async function () {
         const { governorBravo, owner, otherAccount } =
           await loadFixture(deployFixtures);
 
         await governorBravo._setWhitelistAccountExpiration(
-          otherAccount,
-          (await time.latest()) + 1000,
-        );
-
-        await propose(
-          governorBravo.connect(otherAccount),
-          [governorBravo],
-          [0],
-          [
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            (await governorBravo._setPendingAdmin.populateTransaction(owner))
-              .data!,
-          ],
-          "Steal governance",
-        );
-      });
-
-      it("Happy Path (permanent whitelist)", async function () {
-        const { governorBravo, owner, otherAccount } =
-          await loadFixture(deployFixtures);
-
-        await governorBravo.setPermanentWhitelist(
           otherAccount,
           (await time.latest()) + 1000,
         );

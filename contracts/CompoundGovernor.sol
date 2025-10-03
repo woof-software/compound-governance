@@ -115,6 +115,11 @@ contract CompoundGovernor is
     /// @param account The address of the account that is already set.
     error DuplicateAddress(address account);
 
+    /// @notice Error thrown when the minimum number of proposers is reached.
+    /// @dev This error is thrown when the proposal guardian tries to add an allowed proposer when the minimum number of
+    /// proposers is reached.
+    error MinProposersReached();
+
     /// @notice The address and expiration of the proposal guardian.
     struct ProposalGuardian {
         // Address of the `ProposalGuardian`
@@ -393,11 +398,20 @@ contract CompoundGovernor is
     }
 
     /// @notice Adds a new address to the allowed proposers list.
-    /// @dev Only the executor (timelock) can call this function.
+    /// @dev Only the executor (timelock) or proposal guardian (when below minimum proposers) can call this function.
     /// @param _newProposer The address to add to the allowed proposers list.
     function addProposer(address _newProposer) external {
-        if (_executor() != _msgSender()) {
-            revert GovernorOnlyExecutor(_msgSender());
+        address _sender = _msgSender();
+
+        if (_executor() == _sender) {
+            // Timelock can always add proposers
+        } else if (_sender == proposalGuardian.account && block.timestamp <= proposalGuardian.expiration) {
+            // Proposal guardian can only add proposers when below minimum
+            if (allowedProposers.length() >= MIN_PROPOSERS) {
+                revert MinProposersReached();
+            }
+        } else {
+            revert GovernorOnlyExecutor(_sender);
         }
 
         if (_newProposer == address(0)) {

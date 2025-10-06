@@ -5,9 +5,6 @@ import { CompoundGovernorTest } from "test/helpers/CompoundGovernorTest.sol";
 import { IGovernor } from "contracts/extensions/IGovernor.sol";
 import { CompoundGovernor } from "contracts/CompoundGovernor.sol";
 import { GovernorCountingFractionalUpgradeable } from "contracts/extensions/GovernorCountingFractionalUpgradeable.sol";
-import { GovernorCountingSimpleUpgradeable } from "contracts/extensions/GovernorCountingSimpleUpgradeable.sol";
-
-import { console2 } from "forge-std/Test.sol";
 
 contract Initialize is CompoundGovernorTest {
     function test_Initialize() public view {
@@ -283,6 +280,205 @@ contract Propose is CompoundGovernorTest {
             )
         );
         _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_TargetsLengthNotOne()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal with multiple targets (should fail)
+        address[] memory _targets = new address[](2);
+        _targets[0] = address(governor);
+        _targets[1] = address(governor);
+
+        uint256[] memory _values = new uint256[](2);
+        _values[0] = 0;
+        _values[1] = 0;
+
+        bytes[] memory _calldatas = new bytes[](2);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+        _calldatas[1] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with multiple targets"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_CalldatasLengthNotOne()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal with multiple calldatas (should fail)
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](2);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+        _calldatas[1] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with multiple calldatas"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_TargetsAddressNotThis()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal targeting different address (should fail)
+        address[] memory _targets = new address[](1);
+        _targets[0] = makeAddr("differentTarget"); // Not address(this)
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with wrong target"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_CalldatasSelectorNotSetProposalGuardian()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal with wrong selector (should fail)
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        // Use a different selector (setWhitelistGuardian instead of setProposalGuardian)
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setWhitelistGuardian.selector,
+            makeAddr("newGuardian")
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with wrong selector"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_ValidProposalWhenGuardianExpired_SetProposalGuardianOnly()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create valid setProposalGuardian proposal (should succeed)
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Valid setProposalGuardian proposal"
+        );
+
+        // Should not revert
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Verify proposal was created successfully
+        assertTrue(_proposalId > 0);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Active)
+        );
     }
 }
 
@@ -2349,6 +2545,7 @@ contract ProposalEta is CompoundGovernorTest {
 contract ProposalProposer is CompoundGovernorTest {
     function testFuzz_ProposalProposerCorrectWithEnumeratedId(uint256) public {
         address _proposerExpected = _getRandomProposer();
+        _addToAllowedProposers(_proposerExpected);
         Proposal memory _proposal = _buildAnEmptyProposal();
         uint256 _proposalId = _submitProposal(_proposerExpected, _proposal);
         address _proposer = governor.proposalProposer(_proposalId);

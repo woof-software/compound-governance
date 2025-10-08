@@ -1259,7 +1259,7 @@ contract BatchWhitelist is CompoundGovernorTest {
         _proposers[1] = makeAddr("proposer1");
         _proposers[2] = makeAddr("proposer2");
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         governor.batchWhitelist(_proposers);
 
         address[] memory _allowedProposers = governor.getAllowedProposers();
@@ -1274,7 +1274,7 @@ contract BatchWhitelist is CompoundGovernorTest {
         _proposers[0] = proposalGuardian.account;
         _proposers[1] = address(0);
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         vm.expectRevert(
             abi.encodeWithSelector(
                 CompoundGovernor.ZeroAddressAtIndex.selector,
@@ -1290,7 +1290,7 @@ contract BatchWhitelist is CompoundGovernorTest {
         _proposers[1] = makeAddr("proposer1");
         _proposers[2] = makeAddr("proposer1"); // Duplicate
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         vm.expectRevert(
             abi.encodeWithSelector(
                 CompoundGovernor.DuplicateAddress.selector,
@@ -1305,7 +1305,7 @@ contract BatchWhitelist is CompoundGovernorTest {
         _proposers[0] = makeAddr("proposer1");
         _proposers[1] = proposalGuardian.account;
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         vm.expectRevert(
             abi.encodeWithSelector(
                 CompoundGovernor.FirstMustBeProposalGuardian.selector,
@@ -1319,10 +1319,10 @@ contract BatchWhitelist is CompoundGovernorTest {
         address[] memory _proposers = new address[](1);
         _proposers[0] = proposalGuardian.account;
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         governor.batchWhitelist(_proposers);
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         vm.expectRevert(); // Should revert with InvalidInitialization
         governor.batchWhitelist(_proposers);
     }
@@ -1332,11 +1332,22 @@ contract BatchWhitelist is CompoundGovernorTest {
         _proposers[0] = proposalGuardian.account;
         _proposers[1] = makeAddr("proposer1");
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         vm.expectEmit();
         emit CompoundGovernor.ProposerAdded(proposalGuardian.account);
         vm.expectEmit();
         emit CompoundGovernor.ProposerAdded(_proposers[1]);
+        governor.batchWhitelist(_proposers);
+    }
+
+    function test_RevertIf_CallerIsNotProxyAdmin() public {
+        address[] memory _proposers = new address[](1);
+        _proposers[0] = proposalGuardian.account;
+
+        vm.prank(makeAddr("caller"));
+        vm.expectRevert(
+            abi.encodeWithSelector(CompoundGovernor.OnlyProxyAdmin.selector)
+        );
         governor.batchWhitelist(_proposers);
     }
 }

@@ -30,6 +30,8 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
 
     GovernorBravoDelegate public constant GOVERNOR_BRAVO = GovernorBravoDelegate(GOVERNOR_BRAVO_DELEGATE_ADDRESS);
 
+    address public constant PROXY_ADMIN = 0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
+
     function setUp() public virtual {
         // set the RPC URL and the fork block number to create a local execution fork for testing
         vm.createSelectFork(vm.envOr("RPC_URL", string("Please set RPC_URL in your .env file")), FORK_BLOCK);

@@ -120,6 +120,9 @@ contract CompoundGovernor is
     /// proposers is reached.
     error MinProposersReached();
 
+    /// @notice Error thrown when the caller is not the proxy admin.
+    error OnlyProxyAdmin();
+
     /// @notice The address and expiration of the proposal guardian.
     struct ProposalGuardian {
         // Address of the `ProposalGuardian`
@@ -155,6 +158,10 @@ contract CompoundGovernor is
 
     /// @notice Maximum lifetime for a temporary proposer.
     uint32 public constant MAX_TEMPORARY_PROPOSER_LIFETIME = 365 days;
+
+    /// @notice The address of the proxy admin.
+    /// @dev This is the address of the proxy admin that will be used to upgrade the proxy and call batchWhitelist.
+    address public constant PROXY_ADMIN = 0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
 
     /// @notice A set of addresses that are allowed to make proposals.
     /// @dev Using EnumerableSet for managing the allow list.
@@ -202,6 +209,10 @@ contract CompoundGovernor is
     /// @dev This function can only be called once during the upgrade process.
     /// @param _initProposers Array of addresses to add to the allowed proposers list.
     function batchWhitelist(address[] calldata _initProposers) external reinitializer(2) {
+        if (_msgSender() != PROXY_ADMIN) {
+            revert OnlyProxyAdmin();
+        }
+
         if (_initProposers.length == 0) {
             revert EmptyArray();
         }
@@ -407,7 +418,7 @@ contract CompoundGovernor is
 
         if (_executor() == _sender) {
             // Timelock can always add proposers
-        } else if (_sender == _proposalGuardian && block.timestamp <= proposalGuardian.expiration) {
+        } else if (_sender == _proposalGuardian) {
             // Proposal guardian can only add proposers when below minimum
             if (allowedProposers.length() >= MIN_PROPOSERS) {
                 revert MinProposersReached();

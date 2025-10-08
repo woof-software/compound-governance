@@ -124,6 +124,9 @@ contract CompoundGovernor is
     /// setProposalGuardian proposals are allowed.
     error InvalidProposalWhenGuardianExpired();
 
+    /// @notice Error thrown when the caller is not the proxy admin.
+    error OnlyProxyAdmin();
+
     /// @notice The address and expiration of the proposal guardian.
     struct ProposalGuardian {
         // Address of the `ProposalGuardian`
@@ -153,6 +156,10 @@ contract CompoundGovernor is
     /*//////////////////////////////////////////////////////////////
                               NEW STORAGE
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice The address of the proxy admin.
+    /// @dev This is the address of the proxy admin that will be used to upgrade the proxy and call batchWhitelist.
+    address public constant PROXY_ADMIN = 0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
 
     /// @notice Minimum number of proposers that must remain in the allowed proposers list.
     uint8 public constant MIN_PROPOSERS = 5;
@@ -205,10 +212,16 @@ contract CompoundGovernor is
         _setProposalGuardian(_proposalGuardian);
     }
 
-    /// @notice Batch initializes the allowed proposers list during upgrade.
-    /// @dev This function can only be called once during the upgrade process.
-    /// @param _initProposers Array of addresses to add to the allowed proposers list.
+    /**
+     * @notice Batch initializes the allowed proposers list during upgrade.
+     * @dev This function can only be called once during the upgrade process.
+     * @param _initProposers Array of addresses to add to the allowed proposers list.
+     */
     function batchWhitelist(address[] calldata _initProposers) external reinitializer(2) {
+        if (_msgSender() != PROXY_ADMIN) {
+            revert OnlyProxyAdmin();
+        }
+
         if (_initProposers.length == 0) {
             revert EmptyArray();
         }
@@ -412,17 +425,22 @@ contract CompoundGovernor is
         emit WhitelistAccountExpirationSet(_account, _expiration);
     }
 
-    /// @notice Adds a new address to the allowed proposers list.
-    /// @dev Only the executor (timelock) or proposal guardian (when below minimum proposers) can call this function.
-    /// @param _newProposer The address to add to the allowed proposers list.
+    /**
+     * @notice Adds a new address to the allowed proposers list.
+     * @dev Only the executor (timelock) or proposal guardian (when below minimum proposers) can call this function.
+     * @param _newProposer The address to add to the allowed proposers list.
+     */
     function addProposer(address _newProposer) external {
         address _sender = _msgSender();
         address _proposalGuardian = proposalGuardian.account;
 
         if (_executor() == _sender) {
             // Timelock can always add proposers
-        } else if (_sender == _proposalGuardian && block.timestamp <= proposalGuardian.expiration) {
-            // Proposal guardian can only add proposers when below minimum
+        } else if (_sender == _proposalGuardian) {
+            // Note Proposal guardian can add proposers when below minimum proposers even if he is expired
+            // This was done to prevent a case after upgrade where whitelist proposers expired and non of allowed
+            // proposers were whitelisted
+            // Note Proposal guardian can only add proposers when below minimum
             if (allowedProposers.length() > MIN_PROPOSERS) {
                 revert MinProposersReached();
             }
@@ -446,9 +464,11 @@ contract CompoundGovernor is
         emit ProposerAdded(_newProposer);
     }
 
-    /// @notice Removes an address from the allowed proposers list.
-    /// @dev Only the executor (timelock) can call this function.
-    /// @param _proposer The address to remove from the allowed proposers list.
+    /**
+     * @notice Removes an address from the allowed proposers list.
+     * @dev Only the executor (timelock) can call this function.
+     * @param _proposer The address to remove from the allowed proposers list.
+     */
     function removeProposer(address _proposer) external {
         if (_executor() != _msgSender()) {
             revert GovernorOnlyExecutor(_msgSender());

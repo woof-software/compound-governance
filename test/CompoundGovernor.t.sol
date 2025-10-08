@@ -2536,12 +2536,8 @@ contract UpgradeGovernor is CompoundGovernorConstants, CompoundGovernorTest {
             ICompoundTimelock timelock
         ) = _setupUpgradeTest();
 
-        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
         CompoundGovernorTest.Proposal
-            memory upgradeProposal = _createUpgradeProposal(
-                newGovernor,
-                governorProxy
-            );
+            memory upgradeProposal = _createUpgradeProposal(newGovernor);
 
         // Submit the proposal through CompoundGovernor
         address proposer = _majorDelegates[0]; // Use first major delegate
@@ -2569,12 +2565,8 @@ contract UpgradeGovernor is CompoundGovernorConstants, CompoundGovernorTest {
             ICompoundTimelock timelock
         ) = _setupUpgradeTest();
 
-        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
         CompoundGovernorTest.Proposal
-            memory upgradeProposal = _createUpgradeProposal(
-                newGovernor,
-                governorProxy
-            );
+            memory upgradeProposal = _createUpgradeProposal(newGovernor);
 
         // Submit the proposal through CompoundGovernor
         address proposer = _majorDelegates[0]; // Use first major delegate
@@ -2609,8 +2601,6 @@ contract UpgradeGovernor is CompoundGovernorConstants, CompoundGovernorTest {
             ICompoundTimelock timelock
         ) = _setupUpgradeTest();
 
-        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
-
         // Get the current proposal guardian from the existing governor
         (address _proposalGuardian, ) = governor.proposalGuardian();
 
@@ -2639,7 +2629,7 @@ contract UpgradeGovernor is CompoundGovernorConstants, CompoundGovernorTest {
         bytes[] memory _calldatas = new bytes[](1);
         _calldatas[0] = abi.encodeWithSelector(
             ProxyAdmin.upgradeAndCall.selector,
-            governorProxy,
+            GOVERNOR_PROXY_ADDRESS,
             address(newGovernor),
             _batchWhitelistCalldata
         );

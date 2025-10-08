@@ -12,18 +12,14 @@ contract CompoundGovernorConstants {
     uint48 constant INITIAL_VOTE_EXTENSION = 14_400; // Prevents sudden token moves before voting ends (2 days).
 
     // The address of the COMP token
-    address constant COMP_TOKEN_ADDRESS =
-        0xc00e94Cb662C3520282E6f5717214004A7f26888;
+    address constant COMP_TOKEN_ADDRESS = 0xc00e94Cb662C3520282E6f5717214004A7f26888;
 
     // The address of the Timelock
-    address payable constant TIMELOCK_ADDRESS =
-        payable(0x6d903f6003cca6255D85CcA4D3B5E5146dC33925);
+    address payable constant TIMELOCK_ADDRESS = payable(0x6d903f6003cca6255D85CcA4D3B5E5146dC33925);
 
     // The address of the proxy admin
-    address constant PROXY_ADMIN_ADDRESS =
-        0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
-    address constant COMMUNITY_MULTISIG_ADDRESS =
-        0xbbf3f1421D886E9b2c5D716B5192aC998af2012c; // Current proposal
+    address constant PROXY_ADMIN_ADDRESS = 0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
+    address constant COMMUNITY_MULTISIG_ADDRESS = 0xbbf3f1421D886E9b2c5D716B5192aC998af2012c; // Current proposal
     // guardian.
 
     // The fork block for testing
@@ -32,13 +28,14 @@ contract CompoundGovernorConstants {
     uint8 constant VOTE_TYPE_FRACTIONAL = 255;
 
     // GovernorBravo to receive upgrade proposal
-    address constant GOVERNOR_BRAVO_DELEGATE_ADDRESS =
-        0xc0Da02939E1441F497fd74F78cE7Decb17B66529;
+    address constant GOVERNOR_BRAVO_DELEGATE_ADDRESS = 0xc0Da02939E1441F497fd74F78cE7Decb17B66529;
 
     // The deployed CompooundGovernor address for testing upgradability after deployment
     // TODO: for now, just a placeholder
-    address constant DEPLOYED_UPGRADE_CANDIDATE =
-        0x1111111111111111111111111111111111111111;
+    address constant DEPLOYED_UPGRADE_CANDIDATE = 0x1111111111111111111111111111111111111111;
+
+    /// @dev The address of the CompoundGovernor proxy that will be used for testing upgradability
+    address constant GOVERNOR_PROXY_ADDRESS = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
 
     address[] public _majorDelegates;
 

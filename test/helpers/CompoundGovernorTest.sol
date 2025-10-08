@@ -29,6 +29,7 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
     uint96 constant PROPOSAL_GUARDIAN_EXPIRY = 1_739_768_400;
 
     GovernorBravoDelegate public constant GOVERNOR_BRAVO = GovernorBravoDelegate(GOVERNOR_BRAVO_DELEGATE_ADDRESS);
+    address public constant GOVERNOR_BRAVO_PROXY_ADDRESS = 0x6F6e4785c97885d26466945055d4Ae8931bE6f7a;
 
     function setUp() public virtual {
         // set the RPC URL and the fork block number to create a local execution fork for testing

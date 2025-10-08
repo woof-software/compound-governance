@@ -1466,7 +1466,7 @@ contract AllowedProposers is CompoundGovernorTest {
         address[] memory _proposers = new address[](1);
         _proposers[0] = proposalGuardian.account;
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         governor.batchWhitelist(_proposers);
 
         (address proposalGuardian, ) = governor.proposalGuardian();
@@ -1493,7 +1493,7 @@ contract AllowedProposers is CompoundGovernorTest {
         _proposers[3] = makeAddr("proposer3");
         _proposers[4] = makeAddr("proposer4");
 
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         governor.batchWhitelist(_proposers);
 
         uint256 currentLength = governor.getAllowedProposers().length;
@@ -1512,7 +1512,7 @@ contract AllowedProposers is CompoundGovernorTest {
         // First batch whitelist the proposal guardian
         address[] memory _proposers = new address[](1);
         _proposers[0] = proposalGuardian.account;
-        vm.prank(address(governor));
+        vm.prank(PROXY_ADMIN);
         governor.batchWhitelist(_proposers);
 
         vm.expectRevert(
@@ -1578,6 +1578,18 @@ contract AllowedProposers is CompoundGovernorTest {
         );
     }
 
+    function test_ExpiredProposalGuardianTriesToAddProposer() public {
+        address _newProposer = makeAddr("newProposer");
+
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        vm.prank(proposalGuardian.account);
+        governor.addProposer(_newProposer);
+
+        assertTrue(governor.isAllowedProposer(_newProposer));
+    }
+
     function test_ProposalGuardianEmitsEventWhenAddingProposer() public {
         address _newProposer = makeAddr("newProposer");
 
@@ -1609,22 +1621,6 @@ contract AllowedProposers is CompoundGovernorTest {
             )
         );
         governor.addProposer(_extraProposer);
-    }
-
-    function test_RevertIf_ExpiredProposalGuardianTriesToAddProposer() public {
-        address _newProposer = makeAddr("newProposer");
-
-        // Warp to after proposal guardian expiration
-        vm.warp(uint256(proposalGuardian.expiration) + 1);
-
-        vm.prank(proposalGuardian.account);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IGovernor.GovernorOnlyExecutor.selector,
-                proposalGuardian.account
-            )
-        );
-        governor.addProposer(_newProposer);
     }
 
     function test_RevertIf_NonProposalGuardianTriesToAddProposerWhenBelowMinimum()

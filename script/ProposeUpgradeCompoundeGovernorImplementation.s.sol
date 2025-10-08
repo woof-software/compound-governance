@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import { Script, console2 } from "forge-std/Script.sol";
 import { CompoundGovernor } from "contracts/CompoundGovernor.sol";
 import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
-import { IProxyAdmin } from "contracts/interfaces/IProxyAdmin.sol";
+import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
 /// @notice Script to submit a proposal to upgrade the CompoundGovernor implementation.
 /// @dev This script creates a proposal to upgrade the current CompoundGovernor implementation
@@ -29,6 +29,22 @@ contract ProposeUpgradeCompoundeGovernorImplementation is
             payable(COMPOUND_GOVERNOR_PROXY)
         );
 
+        (address _proposalGuardian, ) = governor.proposalGuardian();
+        // Prepare addresses for batchWhitelist call
+        // First address must be proposalGuardian (COMMUNITY_MULTISIG_ADDRESS)
+        address[] memory _initProposers = new address[](5);
+        _initProposers[0] = _proposalGuardian; // proposalGuardian
+        _initProposers[1] = _majorDelegates[0]; // a16z
+        _initProposers[2] = _majorDelegates[1]; // Second major delegate
+        _initProposers[3] = _majorDelegates[2]; // Geoffrey Hayes
+        _initProposers[4] = _majorDelegates[3]; // Gauntlet
+
+        // Encode the batchWhitelist call data
+        bytes memory _batchWhitelistCalldata = abi.encodeWithSelector(
+            CompoundGovernor.batchWhitelist.selector,
+            _initProposers
+        );
+
         // Create proposal targets - we need to call the proxy admin to upgrade
         address[] memory _targets = new address[](1);
         _targets[0] = PROXY_ADMIN_ADDRESS;
@@ -38,10 +54,10 @@ contract ProposeUpgradeCompoundeGovernorImplementation is
 
         bytes[] memory _calldatas = new bytes[](1);
         _calldatas[0] = abi.encodeWithSelector(
-            IProxyAdmin.upgradeAndCall.selector,
+            ProxyAdmin.upgradeAndCall.selector,
             COMPOUND_GOVERNOR_PROXY,
             address(_newImplementation),
-            ""
+            _batchWhitelistCalldata
         );
 
         string memory _description = "Upgrade CompoundGovernor Implementation\n\n"
@@ -49,10 +65,16 @@ contract ProposeUpgradeCompoundeGovernorImplementation is
         "The upgrade will:\n"
         "- Deploy a new CompoundGovernor implementation contract\n"
         "- Update the proxy to point to the new implementation\n"
+        "- Initialize the allowed proposers list with 5 addresses:\n"
+        "  * Community Multisig (proposal guardian)\n"
+        "  * a16z\n"
+        "  * Major delegate #2\n"
+        "  * Geoffrey Hayes\n"
+        "  * Gauntlet\n"
         "- Preserve all existing storage and state\n"
         "- Maintain all current governance parameters and settings\n\n"
-        "This is a standard implementation upgrade that does not change the governance logic,\n"
-        "but may include bug fixes, optimizations, or minor feature improvements.\n\n"
+        "This upgrade includes the new allowed proposers system that replaces the whitelist\n"
+        "mechanism with a more structured approach for managing proposal creation rights.\n\n"
         "The upgrade will be executed through the existing proxy admin, ensuring a safe\n"
         "transition to the new implementation while preserving all current state.";
 
@@ -65,30 +87,24 @@ contract ProposeUpgradeCompoundeGovernorImplementation is
     function run(
         CompoundGovernor _newImplementation
     ) public returns (uint256 _proposalId) {
-        // Get the proposer's private key from environment variables
-        // The proposer must be whitelisted or an allowed proposer
+        // The expectation is the key loaded here corresponds to the address of the `proposer` above.
+        // When running as a script, broadcast will fail if the key is not correct.
+        // These default addresses are the anvils default account #0, if no environment variable is set, meant just for
+        // testing.
         uint256 _proposerKey = vm.envOr(
             "PROPOSER_PRIVATE_KEY",
             uint256(
                 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
             )
         );
-
-        // Get the proposer address from environment or use first major delegate
         address _proposerAddress = vm.envOr(
             "PROPOSER_ADDRESS",
             _majorDelegates[0]
         );
-
-        // Remember the private key for broadcasting
         vm.rememberKey(_proposerKey);
 
-        // Start broadcasting from the proposer address
         vm.startBroadcast(_proposerAddress);
-
-        // Create and submit the proposal
         _proposalId = propose(_newImplementation);
-
         vm.stopBroadcast();
 
         // Log the proposal ID for reference
@@ -98,45 +114,6 @@ contract ProposeUpgradeCompoundeGovernorImplementation is
             "New implementation address:",
             address(_newImplementation)
         );
-        console2.log("Governor proxy address:", COMPOUND_GOVERNOR_PROXY);
-
-        return _proposalId;
-    }
-
-    /// @notice Alternative run function that deploys a new implementation and proposes the upgrade
-    /// @dev This function can be used if you want to deploy a new implementation as part of the script
-    /// @return _proposalId The ID of the created proposal
-    function runWithNewDeployment() public returns (uint256 _proposalId) {
-        // Get the proposer's private key from environment variables
-        uint256 _proposerKey = vm.envOr(
-            "PROPOSER_PRIVATE_KEY",
-            uint256(
-                0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-            )
-        );
-
-        address _proposerAddress = vm.envOr(
-            "PROPOSER_ADDRESS",
-            _majorDelegates[0]
-        );
-        vm.rememberKey(_proposerKey);
-
-        vm.startBroadcast(_proposerAddress);
-
-        // Deploy a new CompoundGovernor implementation
-        CompoundGovernor _newImplementation = new CompoundGovernor();
-
-        // Create and submit the proposal
-        _proposalId = propose(_newImplementation);
-
-        vm.stopBroadcast();
-
-        console2.log(
-            "New implementation deployed at:",
-            address(_newImplementation)
-        );
-        console2.log("Proposal created with ID:", _proposalId);
-        console2.log("Proposer address:", _proposerAddress);
 
         return _proposalId;
     }

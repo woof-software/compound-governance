@@ -5,16 +5,10 @@ import { CompoundGovernorTest } from "test/helpers/CompoundGovernorTest.sol";
 import { IGovernor } from "contracts/extensions/IGovernor.sol";
 import { CompoundGovernor } from "contracts/CompoundGovernor.sol";
 import { GovernorCountingFractionalUpgradeable } from "contracts/extensions/GovernorCountingFractionalUpgradeable.sol";
-import { GovernorCountingSimpleUpgradeable } from "contracts/extensions/GovernorCountingSimpleUpgradeable.sol";
-import { DeployCompoundGovernor } from "script/DeployCompoundGovernor.s.sol";
-import { ProposeUpgradeBravoToCompoundGovernor } from "script/ProposeUpgradeBravoToCompoundGovernor.s.sol";
 import { ICompoundTimelock } from "@openzeppelin/contracts/vendor/compound/ICompoundTimelock.sol";
-import { TransparentUpgradeableProxy } from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
-import { IComp } from "contracts/interfaces/IComp.sol";
-import { IProxyAdmin, ITransparentUpgradeableProxy } from "contracts/interfaces/IProxyAdmin.sol";
 import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
 
-import { console2, StdStorage, stdStorage, Test } from "forge-std/Test.sol";
+import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
 contract Initialize is CompoundGovernorTest {
     function test_Initialize() public view {
@@ -34,294 +28,6 @@ contract Initialize is CompoundGovernorTest {
         // Check that allowedProposers is empty initially
         address[] memory _allowedProposers = governor.getAllowedProposers();
         assertEq(_allowedProposers.length, 0);
-    }
-}
-
-contract UpgradeGovernor is Test, CompoundGovernorConstants {
-    function testFork_UpgradeCompoundGovernorImplementation() public {
-        vm.createSelectFork(vm.envString("RPC_URL"));
-
-        // Deploy new CompoundGovernor implementation
-        CompoundGovernor newGovernor = new CompoundGovernor();
-
-        // Get the existing governor proxy address (this should be the deployed CompoundGovernor)
-        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
-        CompoundGovernor governor = CompoundGovernor(payable(governorProxy));
-
-        // Get the timelock from the governor
-        address timelockAddress = governor.timelock();
-        ICompoundTimelock timelock = ICompoundTimelock(
-            payable(timelockAddress)
-        );
-
-        // Create a proposal to upgrade the governor from current implementation to new one
-        address[] memory _targets = new address[](1);
-        _targets[0] = PROXY_ADMIN_ADDRESS;
-
-        uint256[] memory _values = new uint256[](1);
-        _values[0] = 0;
-
-        bytes[] memory _calldatas = new bytes[](1);
-        _calldatas[0] = abi.encodeWithSelector(
-            IProxyAdmin.upgradeAndCall.selector,
-            governorProxy,
-            address(newGovernor),
-            ""
-        );
-
-        CompoundGovernorTest.Proposal
-            memory upgradeProposal = CompoundGovernorTest.Proposal(
-                _targets,
-                _values,
-                _calldatas,
-                "Upgrade Governor from current implementation to new CompoundGovernor implementation"
-            );
-
-        // Submit the proposal through CompoundGovernor
-        address proposer = _majorDelegates[0]; // Use first major delegate
-
-        // For the current implementation, we need to whitelist the proposer
-        // Check if proposer is already whitelisted
-        if (governor.isWhitelisted(proposer)) {
-            return; // Already whitelisted, nothing to do
-        }
-        // For the current implementation, we need to whitelist the proposer
-        // This requires calling setWhitelistAccountExpiration through the timelock
-        uint256 expiration = block.timestamp + 365 days; // Whitelist for 1 year
-        vm.prank(TIMELOCK_ADDRESS);
-        governor.setWhitelistAccountExpiration(proposer, expiration);
-
-        // Propose the upgrade
-        vm.prank(proposer);
-        uint256 _proposalId = governor.propose(
-            upgradeProposal.targets,
-            upgradeProposal.values,
-            upgradeProposal.calldatas,
-            upgradeProposal.description
-        );
-        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_DELAY + 1);
-
-        // Pass the proposal
-        for (uint256 _index = 0; _index < _majorDelegates.length; _index++) {
-            vm.prank(_majorDelegates[_index]);
-            governor.castVote(
-                _proposalId,
-                uint8(GovernorCountingSimpleUpgradeable.VoteType.For)
-            );
-        }
-        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
-
-        // Queue the proposal
-        governor.queue(_proposalId);
-
-        // Wait for timelock delay and execute
-        vm.warp(block.timestamp + timelock.delay() + 1);
-        governor.execute(_proposalId);
-
-        // Verify the upgrade was successful by checking that the new implementation is active
-        // We can verify this by checking if the governor still functions correctly
-        bool isWhitelisted = governor.isWhitelisted(
-            0x6d903f6003cca6255D85CcA4D3B5E5146dC33925
-        );
-        assertFalse(isWhitelisted);
-    }
-
-    function testFork_UpgradeCompoundGovernoorStorageSafetyCheck() public {
-        vm.createSelectFork(vm.envString("RPC_URL"));
-
-        // Deploy new CompoundGovernor implementation
-        CompoundGovernor newGovernor = new CompoundGovernor();
-
-        // Get the existing governor proxy address (this should be the deployed CompoundGovernor)
-        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
-        CompoundGovernor governor = CompoundGovernor(payable(governorProxy));
-
-        // Get the timelock from the governor
-        address timelockAddress = governor.timelock();
-        ICompoundTimelock timelock = ICompoundTimelock(
-            payable(timelockAddress)
-        );
-
-        // Token and timelock addresses
-        address tokenAddress = address(governor.token());
-        address timelockAddr = governor.timelock();
-
-        // Whitelist and proposal guardian settings
-        address whitelistGuardianAddr = governor.whitelistGuardian();
-        (
-            address proposalGuardianAccount,
-            uint96 proposalGuardianExpiry
-        ) = governor.proposalGuardian();
-
-        // Create a proposal to upgrade the governor from current implementation to new one
-        address[] memory _targets = new address[](1);
-        _targets[0] = PROXY_ADMIN_ADDRESS;
-
-        uint256[] memory _values = new uint256[](1);
-        _values[0] = 0;
-
-        bytes[] memory _calldatas = new bytes[](1);
-        _calldatas[0] = abi.encodeWithSelector(
-            IProxyAdmin.upgradeAndCall.selector,
-            governorProxy,
-            address(newGovernor),
-            ""
-        );
-
-        CompoundGovernorTest.Proposal
-            memory upgradeProposal = CompoundGovernorTest.Proposal(
-                _targets,
-                _values,
-                _calldatas,
-                "Upgrade Governor from current implementation to new CompoundGovernor implementation"
-            );
-
-        // Submit the proposal through CompoundGovernor
-        address proposer = _majorDelegates[0]; // Use first major delegate
-
-        // For the current implementation, we need to whitelist the proposer
-        // Check if proposer is already whitelisted
-        if (governor.isWhitelisted(proposer)) {
-            return; // Already whitelisted, nothing to do
-        }
-        // For the current implementation, we need to whitelist the proposer
-        // This requires calling setWhitelistAccountExpiration through the timelock
-        uint256 expiration = block.timestamp + 365 days; // Whitelist for 1 year
-        vm.prank(TIMELOCK_ADDRESS);
-        governor.setWhitelistAccountExpiration(proposer, expiration);
-
-        // Propose the upgrade
-        vm.prank(proposer);
-        uint256 _proposalId = governor.propose(
-            upgradeProposal.targets,
-            upgradeProposal.values,
-            upgradeProposal.calldatas,
-            upgradeProposal.description
-        );
-        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_DELAY + 1);
-
-        // Pass the proposal
-        for (uint256 _index = 0; _index < _majorDelegates.length; _index++) {
-            vm.prank(_majorDelegates[_index]);
-            governor.castVote(
-                _proposalId,
-                uint8(GovernorCountingSimpleUpgradeable.VoteType.For)
-            );
-        }
-        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
-
-        // Queue the proposal
-        governor.queue(_proposalId);
-
-        // Wait for timelock delay and execute
-        vm.warp(block.timestamp + timelock.delay() + 1);
-
-        /*//////////////////////////////////////////////////////////////
-                                STORAGE BEFORE
-        //////////////////////////////////////////////////////////////*/
-
-        // Get storage values
-        uint256 votingDelay = governor.votingDelay();
-        uint256 votingPeriod = governor.votingPeriod();
-        uint256 proposalThreshold = governor.proposalThreshold();
-        uint256 quorum = governor.quorum(block.timestamp);
-        uint48 voteExtension = governor.lateQuorumVoteExtension();
-
-        // Execture proposal
-        governor.execute(_proposalId);
-
-        /*//////////////////////////////////////////////////////////////
-                                STORAGE AFTER
-        //////////////////////////////////////////////////////////////*/
-
-        // Get storage values
-        uint256 votingDelayAfter = governor.votingDelay();
-        uint256 votingPeriodAfter = governor.votingPeriod();
-        uint256 proposalThresholdAfter = governor.proposalThreshold();
-        uint256 quorumAfter = governor.quorum(block.timestamp);
-        uint48 voteExtensionAfter = governor.lateQuorumVoteExtension();
-        address tokenAddressAfter = address(governor.token());
-        address timelockAddrAfter = governor.timelock();
-
-        // Whitelist and proposal guardian settings
-        address whitelistGuardianAddrAfter = governor.whitelistGuardian();
-        (
-            address proposalGuardianAccountAfter,
-            uint96 proposalGuardianExpiryAfter
-        ) = governor.proposalGuardian();
-
-        // ===== ASSERT STORAGE CONSISTENCY =====
-
-        // Core governance settings should remain unchanged
-        assertEq(
-            votingDelay,
-            votingDelayAfter,
-            "Voting delay changed after upgrade"
-        );
-        assertEq(
-            votingPeriod,
-            votingPeriodAfter,
-            "Voting period changed after upgrade"
-        );
-        assertEq(
-            proposalThreshold,
-            proposalThresholdAfter,
-            "Proposal threshold changed after upgrade"
-        );
-        assertEq(quorum, quorumAfter, "Quorum changed after upgrade");
-        assertEq(
-            voteExtension,
-            voteExtensionAfter,
-            "Vote extension changed after upgrade"
-        );
-
-        // Token and timelock addresses should remain unchanged
-        assertEq(
-            tokenAddress,
-            tokenAddressAfter,
-            "Token address changed after upgrade"
-        );
-        assertEq(
-            timelockAddr,
-            timelockAddrAfter,
-            "Timelock address changed after upgrade"
-        );
-
-        // Whitelist and proposal guardian settings should remain unchanged
-        assertEq(
-            whitelistGuardianAddr,
-            whitelistGuardianAddrAfter,
-            "Whitelist guardian changed after upgrade"
-        );
-        assertEq(
-            proposalGuardianAccount,
-            proposalGuardianAccountAfter,
-            "Proposal guardian account changed after upgrade"
-        );
-        assertEq(
-            proposalGuardianExpiry,
-            proposalGuardianExpiryAfter,
-            "Proposal guardian expiry changed after upgrade"
-        );
-
-        // Verify the upgrade was successful by checking that the governor still functions
-        // Check that the governor can still access its core functionality
-        assertTrue(
-            address(governor.token()) != address(0),
-            "Token address should not be zero"
-        );
-        assertTrue(
-            governor.timelock() != address(0),
-            "Timelock address should not be zero"
-        );
-        assertTrue(
-            governor.votingDelay() > 0,
-            "Voting delay should be greater than zero"
-        );
-        assertTrue(
-            governor.votingPeriod() > 0,
-            "Voting period should be greater than zero"
-        );
     }
 }
 
@@ -2819,5 +2525,207 @@ contract State is CompoundGovernorTest {
             )
         );
         governor.state(_invalidProposalId);
+    }
+}
+
+contract UpgradeGovernor is CompoundGovernorConstants, CompoundGovernorTest {
+    function testFork_UpgradeCompoundGovernorImplementation() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+            ICompoundTimelock timelock
+        ) = _setupUpgradeTest();
+
+        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
+        CompoundGovernorTest.Proposal
+            memory upgradeProposal = _createUpgradeProposal(
+                newGovernor,
+                governorProxy
+            );
+
+        // Submit the proposal through CompoundGovernor
+        address proposer = _majorDelegates[0]; // Use first major delegate
+        _whitelistProposerIfNeeded(governor, proposer);
+
+        uint256 _proposalId = _submitAndPassProposal(
+            governor,
+            upgradeProposal,
+            proposer
+        );
+        _executeProposal(governor, timelock, _proposalId);
+
+        // Verify the upgrade was successful by checking that the new implementation is active
+        // We can verify this by checking if the governor still functions correctly
+        bool isWhitelisted = governor.isWhitelisted(
+            0x6d903f6003cca6255D85CcA4D3B5E5146dC33925
+        );
+        assertFalse(isWhitelisted);
+    }
+
+    function testFork_UpgradeCompoundGovernoorStorageSafetyCheck() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+            ICompoundTimelock timelock
+        ) = _setupUpgradeTest();
+
+        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
+        CompoundGovernorTest.Proposal
+            memory upgradeProposal = _createUpgradeProposal(
+                newGovernor,
+                governorProxy
+            );
+
+        // Submit the proposal through CompoundGovernor
+        address proposer = _majorDelegates[0]; // Use first major delegate
+        _whitelistProposerIfNeeded(governor, proposer);
+
+        uint256 _proposalId = _submitAndPassProposal(
+            governor,
+            upgradeProposal,
+            proposer
+        );
+
+        /*//////////////////////////////////////////////////////////////
+                                STORAGE BEFORE
+        //////////////////////////////////////////////////////////////*/
+        CompoundGovernorTest.StorageSnapshot
+            memory beforeSnapshot = _captureStorageSnapshot(governor);
+
+        // Execute proposal
+        _executeProposal(governor, timelock, _proposalId);
+
+        /*//////////////////////////////////////////////////////////////
+                                STORAGE AFTER
+        //////////////////////////////////////////////////////////////*/
+        _assertStorageConsistency(beforeSnapshot, governor);
+        _verifyBasicFunctionality(governor);
+    }
+
+    function testFork_UpgradeCompoundGovernorWithBatchWhitelist() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+            ICompoundTimelock timelock
+        ) = _setupUpgradeTest();
+
+        address governorProxy = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
+
+        // Get the current proposal guardian from the existing governor
+        (address _proposalGuardian, ) = governor.proposalGuardian();
+
+        // Prepare addresses for batchWhitelist call
+        // First address must be proposalGuardian
+        address[] memory _initProposers = new address[](5);
+        _initProposers[0] = _proposalGuardian; // proposalGuardian
+        _initProposers[1] = _majorDelegates[0]; // a16z
+        _initProposers[2] = _majorDelegates[1]; // Second major delegate
+        _initProposers[3] = _majorDelegates[2]; // Geoffrey Hayes
+        _initProposers[4] = _majorDelegates[3]; // Gauntlet
+
+        // Encode the batchWhitelist call data
+        bytes memory _batchWhitelistCalldata = abi.encodeWithSelector(
+            CompoundGovernor.batchWhitelist.selector,
+            _initProposers
+        );
+
+        // Create upgrade proposal with batchWhitelist call
+        address[] memory _targets = new address[](1);
+        _targets[0] = PROXY_ADMIN_ADDRESS;
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            ProxyAdmin.upgradeAndCall.selector,
+            governorProxy,
+            address(newGovernor),
+            _batchWhitelistCalldata
+        );
+
+        CompoundGovernorTest.Proposal
+            memory upgradeProposal = CompoundGovernorTest.Proposal(
+                _targets,
+                _values,
+                _calldatas,
+                "Upgrade Governor with batchWhitelist initialization"
+            );
+
+        // Submit the proposal through CompoundGovernor
+        address proposer = _majorDelegates[0]; // Use first major delegate
+        _whitelistProposerIfNeeded(governor, proposer);
+
+        uint256 _proposalId = _submitAndPassProposal(
+            governor,
+            upgradeProposal,
+            proposer
+        );
+
+        // Execute proposal
+        _executeProposal(governor, timelock, _proposalId);
+
+        // Verify that the upgrade was successful and batchWhitelist was called
+        // Check that all addresses are properly set in the allowed proposers list
+        address[] memory allowedProposers = governor.getAllowedProposers();
+
+        // Should have exactly 5 allowed proposers
+        assertEq(
+            allowedProposers.length,
+            5,
+            "Should have exactly 5 allowed proposers"
+        );
+
+        // Verify each address is correctly set
+        assertEq(
+            allowedProposers[0],
+            _proposalGuardian,
+            "First address should be proposal guardian"
+        );
+        assertEq(
+            allowedProposers[1],
+            _majorDelegates[0],
+            "Second address should be a16z"
+        );
+        assertEq(
+            allowedProposers[2],
+            _majorDelegates[1],
+            "Third address should be second major delegate"
+        );
+        assertEq(
+            allowedProposers[3],
+            _majorDelegates[2],
+            "Fourth address should be Geoffrey Hayes"
+        );
+        assertEq(
+            allowedProposers[4],
+            _majorDelegates[3],
+            "Fifth address should be Gauntlet"
+        );
+
+        // Verify that all addresses are recognized as allowed proposers
+        for (uint256 i = 0; i < _initProposers.length; i++) {
+            assertTrue(
+                governor.isAllowedProposer(_initProposers[i]),
+                string(
+                    abi.encodePacked(
+                        "Address at index ",
+                        i,
+                        " should be an allowed proposer"
+                    )
+                )
+            );
+        }
+
+        // Verify that the proposal guardian is correctly set
+        (address currentProposalGuardian, ) = governor.proposalGuardian();
+        assertEq(
+            currentProposalGuardian,
+            _proposalGuardian,
+            "Proposal guardian should remain unchanged"
+        );
+
+        // Verify basic functionality still works
+        _verifyBasicFunctionality(governor);
     }
 }

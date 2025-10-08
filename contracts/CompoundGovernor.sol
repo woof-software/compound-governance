@@ -205,9 +205,11 @@ contract CompoundGovernor is
         _setProposalGuardian(_proposalGuardian);
     }
 
-    /// @notice Batch initializes the allowed proposers list during upgrade.
-    /// @dev This function can only be called once during the upgrade process.
-    /// @param _initProposers Array of addresses to add to the allowed proposers list.
+    /**
+     * @notice Batch initializes the allowed proposers list during upgrade.
+     * @dev This function can only be called once during the upgrade process.
+     * @param _initProposers Array of addresses to add to the allowed proposers list.
+     */
     function batchWhitelist(address[] calldata _initProposers) external reinitializer(2) {
         if (_msgSender() != PROXY_ADMIN) {
             revert OnlyProxyAdmin();
@@ -409,9 +411,11 @@ contract CompoundGovernor is
         emit WhitelistAccountExpirationSet(_account, _expiration);
     }
 
-    /// @notice Adds a new address to the allowed proposers list.
-    /// @dev Only the executor (timelock) or proposal guardian (when below minimum proposers) can call this function.
-    /// @param _newProposer The address to add to the allowed proposers list.
+    /**
+     * @notice Adds a new address to the allowed proposers list.
+     * @dev Only the executor (timelock) or proposal guardian (when below minimum proposers) can call this function.
+     * @param _newProposer The address to add to the allowed proposers list.
+     */
     function addProposer(address _newProposer) external {
         address _sender = _msgSender();
         address _proposalGuardian = proposalGuardian.account;
@@ -419,7 +423,10 @@ contract CompoundGovernor is
         if (_executor() == _sender) {
             // Timelock can always add proposers
         } else if (_sender == _proposalGuardian) {
-            // Proposal guardian can only add proposers when below minimum
+            // Note Proposal guardian can add proposers when below minimum proposers even if he is expired
+            // This was done to prevent a case after upgrade where whitelist proposers expired and non of allowed
+            // proposers were whitelisted
+            // Note Proposal guardian can only add proposers when below minimum
             if (allowedProposers.length() >= MIN_PROPOSERS) {
                 revert MinProposersReached();
             }
@@ -443,9 +450,11 @@ contract CompoundGovernor is
         emit ProposerAdded(_newProposer);
     }
 
-    /// @notice Removes an address from the allowed proposers list.
-    /// @dev Only the executor (timelock) can call this function.
-    /// @param _proposer The address to remove from the allowed proposers list.
+    /**
+     * @notice Removes an address from the allowed proposers list.
+     * @dev Only the executor (timelock) can call this function.
+     * @param _proposer The address to remove from the allowed proposers list.
+     */
     function removeProposer(address _proposer) external {
         if (_executor() != _msgSender()) {
             revert GovernorOnlyExecutor(_msgSender());

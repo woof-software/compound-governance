@@ -219,8 +219,9 @@ contract CompoundGovernor is
         }
 
         // Check for zero addresses and duplicates
+        address proposer;
         for (uint256 i; i < _initProposers.length;) {
-            address proposer = _initProposers[i];
+            proposer = _initProposers[i];
 
             if (proposer == address(0)) {
                 revert ZeroAddressAtIndex(i);
@@ -416,10 +417,11 @@ contract CompoundGovernor is
     /// @param _newProposer The address to add to the allowed proposers list.
     function addProposer(address _newProposer) external {
         address _sender = _msgSender();
+        address _proposalGuardian = proposalGuardian.account;
 
         if (_executor() == _sender) {
             // Timelock can always add proposers
-        } else if (_sender == proposalGuardian.account && block.timestamp <= proposalGuardian.expiration) {
+        } else if (_sender == _proposalGuardian && block.timestamp <= proposalGuardian.expiration) {
             // Proposal guardian can only add proposers when below minimum
             if (allowedProposers.length() >= MIN_PROPOSERS) {
                 revert MinProposersReached();
@@ -432,15 +434,15 @@ contract CompoundGovernor is
             revert ZeroAddress();
         }
 
-        if (_newProposer == proposalGuardian.account) {
+        if (_newProposer == _proposalGuardian) {
             revert IsProposalGuardian(_newProposer);
         }
 
-        bool added = allowedProposers.add(_newProposer);
-        if (!added) {
+        if (allowedProposers.contains(_newProposer)) {
             revert AlreadySet(_newProposer);
         }
 
+        allowedProposers.add(_newProposer);
         emit ProposerAdded(_newProposer);
     }
 

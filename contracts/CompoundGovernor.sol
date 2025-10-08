@@ -423,7 +423,7 @@ contract CompoundGovernor is
             // Timelock can always add proposers
         } else if (_sender == _proposalGuardian && block.timestamp <= proposalGuardian.expiration) {
             // Proposal guardian can only add proposers when below minimum
-            if (allowedProposers.length() >= MIN_PROPOSERS) {
+            if (allowedProposers.length() > MIN_PROPOSERS) {
                 revert MinProposersReached();
             }
         } else {

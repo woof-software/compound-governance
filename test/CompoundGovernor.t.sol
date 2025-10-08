@@ -1772,11 +1772,11 @@ contract AllowedProposers is CompoundGovernorTest {
         governor.addProposer(_newProposer);
     }
 
-    function test_RevertIf_ProposalGuardianTriesToAddProposerWhenAtOrAboveMinimum()
+    function test_RevertIf_ProposalGuardianTriesToAddProposerWhenAboveMinimum()
         public
     {
         // First, add enough proposers to reach MIN_PROPOSERS
-        for (uint256 i = 0; i < governor.MIN_PROPOSERS(); i++) {
+        for (uint256 i = 0; i <= governor.MIN_PROPOSERS(); i++) {
             address _newProposer = makeAddr(
                 string(abi.encodePacked("proposer", i))
             );

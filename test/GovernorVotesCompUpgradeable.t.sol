@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 import { Test } from "forge-std/Test.sol";
 import { GovernorVotesCompUpgradeable } from "contracts/extensions/GovernorVotesCompUpgradeable.sol";
-import { CompoundGovernorConstants } from "../script/CompoundGovernorConstants.sol";
+import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
 import { IComp } from "contracts/interfaces/IComp.sol";
 
 contract GovernorVotesCompUpgradeableTestHarness is

@@ -15,9 +15,10 @@ import {GovernorPreventLateQuorumUpgradeable} from "contracts/extensions/Governo
 import {IComp} from "contracts/interfaces/IComp.sol";
 import {GovernorAlphaInterface} from "contracts/GovernorBravoInterfaces.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /// @title CompoundGovernor
-/// @author [ScopeLift](https://scopelift.co)
+/// @author WOOF! Software
 /// @notice A governance contract for the Compound DAO.
 /// @custom:security-contact security@compound.finance
 contract CompoundGovernor is
@@ -30,6 +31,9 @@ contract CompoundGovernor is
     GovernorSettableFixedQuorumUpgradeable,
     GovernorSequentialProposalIdUpgradeable
 {
+    /// @dev To use the `EnumerableSet` library for managing a set of addresses.
+    using EnumerableSet for EnumerableSet.AddressSet;
+
     /// @notice Emitted when the expiration of a whitelisted account is set or updated.
     /// @param account The address of the account being whitelisted.
     /// @param expiration The timestamp until which the account is whitelisted.
@@ -52,6 +56,14 @@ contract CompoundGovernor is
         uint96 newProposalGuardianExpiry
     );
 
+    /// @notice Emitted when a new proposer is added to the allowed proposers list.
+    /// @param proposer The address of the proposer that was added.
+    event ProposerAdded(address indexed proposer);
+
+    /// @notice Emitted when a proposer is removed from the allowed proposers list.
+    /// @param proposer The address of the proposer that was removed.
+    event ProposerRemoved(address indexed proposer);
+
     /// @notice Error thrown when an unauthorized address attempts to perform a restricted action.
     /// @param reason A brief description of why the caller is unauthorized.
     /// @param caller The address that attempted the unauthorized action.
@@ -62,6 +74,54 @@ contract CompoundGovernor is
     /// @param proposalId The ID of the active proposal.
     /// @param state The state of the active proposal.
     error ProposerActiveProposal(address proposer, uint256 proposalId, ProposalState state);
+
+    /// @notice Error thrown when a zero address is used.
+    error ZeroAddress();
+
+    /// @notice Error thrown when a zero address is used at a specific index.
+    /// @param index The index where the zero address was used.
+    error ZeroAddressAtIndex(uint256 index);
+
+    /// @notice Error thrown when a caller is not an allowed proposer.
+    error OnlyAllowedProposers();
+
+    /// @notice Error thrown when an account is already set.
+    /// @param account The address of the account that is already set.
+    error AlreadySet(address account);
+
+    /// @notice Error thrown when an account is the proposal guardian.
+    /// @param account The address of the account that is the proposal guardian.
+    error IsProposalGuardian(address account);
+
+    /// @notice Error thrown when an account's lifetime exceeds the maximum lifetime.
+    /// @param account The address of the account that exceeds the maximum lifetime.
+    error ExceedsMaxLifetime(address account);
+
+    /// @notice Error thrown when an account is not in the allowed proposers list.
+    /// @param account The address of the account that is not in the allowed proposers list.
+    error NotInAllowedProposers(address account);
+
+    /// @notice Error thrown when amount of allowed proposers is below the minimum proposers.
+    error BelowMinimumProposers();
+
+    /// @notice Error thrown when an array is empty.
+    error EmptyArray();
+
+    /// @notice Error thrown during batchWhitelist when the first address is not the proposal guardian.
+    /// @param account The address of the account that is not the proposal guardian.
+    error FirstMustBeProposalGuardian(address account);
+
+    /// @notice Error thrown during batchWhitelist when an account is duplicated.
+    /// @param account The address of the account that is already set.
+    error DuplicateAddress(address account);
+
+    /// @notice Error thrown when the minimum number of proposers is reached.
+    /// @dev This error is thrown when the proposal guardian tries to add an allowed proposer when the minimum number of
+    /// proposers is reached.
+    error MinProposersReached();
+
+    /// @notice Error thrown when the caller is not the proxy admin.
+    error OnlyProxyAdmin();
 
     /// @notice The address and expiration of the proposal guardian.
     struct ProposalGuardian {
@@ -88,6 +148,24 @@ contract CompoundGovernor is
 
     /// @notice Stores the latest proposal ID for each proposer.
     mapping(address proposer => uint256 latestProposalId) public latestProposalIds;
+
+    /*//////////////////////////////////////////////////////////////
+                              NEW STORAGE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Minimum number of proposers that must remain in the allowed proposers list.
+    uint8 public constant MIN_PROPOSERS = 5;
+
+    /// @notice Maximum lifetime for a temporary proposer.
+    uint32 public constant MAX_TEMPORARY_PROPOSER_LIFETIME = 365 days;
+
+    /// @notice The address of the proxy admin.
+    /// @dev This is the address of the proxy admin that will be used to upgrade the proxy and call batchWhitelist.
+    address public constant PROXY_ADMIN = 0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
+
+    /// @notice A set of addresses that are allowed to make proposals.
+    /// @dev Using EnumerableSet for managing the allow list.
+    EnumerableSet.AddressSet private allowedProposers;
 
     /// @notice Disables the initialize function.
     constructor() {
@@ -125,6 +203,45 @@ contract CompoundGovernor is
         __GovernorCountingFractional_init();
         _setWhitelistGuardian(_whitelistGuardian);
         _setProposalGuardian(_proposalGuardian);
+    }
+
+    /**
+     * @notice Batch initializes the allowed proposers list during upgrade.
+     * @dev This function can only be called once during the upgrade process.
+     * @param _initProposers Array of addresses to add to the allowed proposers list.
+     */
+    function batchWhitelist(address[] calldata _initProposers) external reinitializer(2) {
+        if (_msgSender() != PROXY_ADMIN) {
+            revert OnlyProxyAdmin();
+        }
+
+        if (_initProposers.length == 0) {
+            revert EmptyArray();
+        }
+
+        // First address must be proposalGuardian
+        if (_initProposers[0] != proposalGuardian.account) {
+            revert FirstMustBeProposalGuardian(_initProposers[0]);
+        }
+
+        // Check for zero addresses and duplicates
+        address proposer;
+        for (uint256 i; i < _initProposers.length;) {
+            proposer = _initProposers[i];
+
+            if (proposer == address(0)) {
+                revert ZeroAddressAtIndex(i);
+            }
+            if (!allowedProposers.add(proposer)) {
+                revert DuplicateAddress(proposer);
+            }
+
+            emit ProposerAdded(proposer);
+
+            unchecked {
+                ++i;
+            }
+        }
     }
 
     /// @notice Sets the next proposal ID. Designed to be callable once by the executor (timelock) on upgrade from
@@ -175,15 +292,9 @@ contract CompoundGovernor is
             revert GovernorRestrictedProposer(_proposer);
         }
 
-        if (!isWhitelisted(_proposer)) {
-            // check proposal threshold
-            uint256 _votesThreshold = proposalThreshold();
-            if (_votesThreshold > 0) {
-                uint256 _proposerVotes = getVotes(_proposer, clock() - 1);
-                if (_proposerVotes < _votesThreshold) {
-                    revert GovernorInsufficientProposerVotes(_proposer, _proposerVotes, _votesThreshold);
-                }
-            }
+        // Check if proposer is in allowed proposers list or has temporary whitelist
+        if (!isAllowedProposer(_proposer) && !isWhitelisted(_proposer)) {
+            revert GovernorNotWhitelisted(_proposer);
         }
 
         return _propose(_targets, _values, _calldatas, _description, _proposer);
@@ -243,16 +354,7 @@ contract CompoundGovernor is
             return _cancel(_targets, _values, _calldatas, _descriptionHash);
         }
 
-        // For other cancellation attempts, check proposer's voting power.
-        bool _isProposerAboveThreshold = token().getPriorVotes(_proposer, block.number - 1) >= proposalThreshold();
-        if (_isProposerAboveThreshold) {
-            revert Unauthorized("Proposer above proposalThreshold", msg.sender);
-        }
-
-        // Check whitelist status
-        if (isWhitelisted(_proposer) && msg.sender != whitelistGuardian) {
-            revert Unauthorized("Not whitelistGuardian", msg.sender);
-        }
+        // Whitelist guardian restriction removed for allowed proposers system
 
         return _cancel(_targets, _values, _calldatas, _descriptionHash);
     }
@@ -278,12 +380,104 @@ contract CompoundGovernor is
     /// @param _account The address of the account to be whitelisted.
     /// @param _expiration The timestamp until which the account will be whitelisted.
     function setWhitelistAccountExpiration(address _account, uint256 _expiration) external {
-        if (msg.sender != _executor() && msg.sender != whitelistGuardian) {
-            revert Unauthorized("Not timelock or guardian", msg.sender);
+        // Check that msg.sender is in allowedProposers
+        if (!allowedProposers.contains(_msgSender())) {
+            revert OnlyAllowedProposers();
+        }
+
+        // Check that _account is not zero address
+        if (_account == address(0)) {
+            revert ZeroAddress();
+        }
+
+        // Check that _account is not in allowedProposers
+        if (allowedProposers.contains(_account)) {
+            revert AlreadySet(_account);
+        }
+
+        // Check that _account is not equal to proposalGuardian
+        if (_account == proposalGuardian.account) {
+            revert IsProposalGuardian(_account);
+        }
+
+        // If expiration is not less than now, check the lifetime constraint
+        if (_expiration > block.timestamp) {
+            if (_expiration - block.timestamp > MAX_TEMPORARY_PROPOSER_LIFETIME) {
+                revert ExceedsMaxLifetime(_account);
+            }
         }
 
         whitelistAccountExpirations[_account] = _expiration;
         emit WhitelistAccountExpirationSet(_account, _expiration);
+    }
+
+    /**
+     * @notice Adds a new address to the allowed proposers list.
+     * @dev Only the executor (timelock) or proposal guardian (when below minimum proposers) can call this function.
+     * @param _newProposer The address to add to the allowed proposers list.
+     */
+    function addProposer(address _newProposer) external {
+        address _sender = _msgSender();
+        address _proposalGuardian = proposalGuardian.account;
+
+        if (_executor() == _sender) {
+            // Timelock can always add proposers
+        } else if (_sender == _proposalGuardian) {
+            // Note Proposal guardian can add proposers when below minimum proposers even if he is expired
+            // This was done to prevent a case after upgrade where whitelist proposers expired and non of allowed
+            // proposers were whitelisted
+            // Note Proposal guardian can only add proposers when below minimum
+            if (allowedProposers.length() >= MIN_PROPOSERS) {
+                revert MinProposersReached();
+            }
+        } else {
+            revert GovernorOnlyExecutor(_sender);
+        }
+
+        if (_newProposer == address(0)) {
+            revert ZeroAddress();
+        }
+
+        if (_newProposer == _proposalGuardian) {
+            revert IsProposalGuardian(_newProposer);
+        }
+
+        if (allowedProposers.contains(_newProposer)) {
+            revert AlreadySet(_newProposer);
+        }
+
+        allowedProposers.add(_newProposer);
+        emit ProposerAdded(_newProposer);
+    }
+
+    /**
+     * @notice Removes an address from the allowed proposers list.
+     * @dev Only the executor (timelock) can call this function.
+     * @param _proposer The address to remove from the allowed proposers list.
+     */
+    function removeProposer(address _proposer) external {
+        if (_executor() != _msgSender()) {
+            revert GovernorOnlyExecutor(_msgSender());
+        }
+
+        if (_proposer == address(0)) {
+            revert ZeroAddress();
+        }
+
+        if (_proposer == proposalGuardian.account) {
+            revert IsProposalGuardian(_proposer);
+        }
+
+        if (!allowedProposers.contains(_proposer)) {
+            revert NotInAllowedProposers(_proposer);
+        }
+
+        if (allowedProposers.length() <= MIN_PROPOSERS) {
+            revert BelowMinimumProposers();
+        }
+
+        allowedProposers.remove(_proposer);
+        emit ProposerRemoved(_proposer);
     }
 
     /// @notice Checks if an account is currently whitelisted.
@@ -295,6 +489,19 @@ contract CompoundGovernor is
     /// @return bool Returns true if the account is whitelisted (expiration is in the future), false otherwise.
     function isWhitelisted(address _account) public view returns (bool) {
         return (whitelistAccountExpirations[_account] > block.timestamp);
+    }
+
+    /// @notice Returns the list of allowed proposers.
+    /// @return address[] An array of addresses that are allowed to make proposals.
+    function getAllowedProposers() public view returns (address[] memory) {
+        return allowedProposers.values();
+    }
+
+    /// @notice Checks if an address is in the allowed proposers list.
+    /// @param _account The address to check.
+    /// @return bool True if the address is an allowed proposer.
+    function isAllowedProposer(address _account) public view returns (bool) {
+        return allowedProposers.contains(_account);
     }
 
     /// @notice Sets a new `whitelistGuardian`.

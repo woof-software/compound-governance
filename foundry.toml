@@ -52,3 +52,6 @@
     "contracts/test/GovernorAlpha.sol",
     "contracts/test/Multicall.sol"
   ]
+
+[lint]
+exclude_lints = ["asm-keccak256"]

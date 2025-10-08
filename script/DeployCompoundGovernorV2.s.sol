@@ -7,6 +7,7 @@ import { Script, console } from "forge-std/Script.sol";
 import { CompoundGovernor } from "contracts/CompoundGovernor.sol";
 import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
 
+// Deploy script for the CompoundGovernor Implementation that will be used by the proxy
 contract DeployCompoundGovernorV2 is Script, CompoundGovernorConstants {
     uint256 deployerPrivateKey;
 

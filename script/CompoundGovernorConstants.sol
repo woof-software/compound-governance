@@ -18,9 +18,9 @@ contract CompoundGovernorConstants {
     address payable constant TIMELOCK_ADDRESS = payable(0x6d903f6003cca6255D85CcA4D3B5E5146dC33925);
 
     // The address of the proxy admin
-    address constant PROXY_ADMIN_ADDRESS = 0x08af690B4bd347c13BA57D7731b277f5d3D7434A;
+    address constant PROXY_ADMIN_ADDRESS = 0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
     address constant COMMUNITY_MULTISIG_ADDRESS = 0xbbf3f1421D886E9b2c5D716B5192aC998af2012c; // Current proposal
-        // guardian.
+    // guardian.
 
     // The fork block for testing
     uint256 constant FORK_BLOCK = 21_017_323;
@@ -33,6 +33,9 @@ contract CompoundGovernorConstants {
     // The deployed CompooundGovernor address for testing upgradability after deployment
     // TODO: for now, just a placeholder
     address constant DEPLOYED_UPGRADE_CANDIDATE = 0x1111111111111111111111111111111111111111;
+
+    /// @dev The address of the CompoundGovernor proxy that will be used for testing upgradability
+    address constant GOVERNOR_PROXY_ADDRESS = 0x309a862bbC1A00e45506cB8A802D1ff10004c8C0;
 
     address[] public _majorDelegates;
 

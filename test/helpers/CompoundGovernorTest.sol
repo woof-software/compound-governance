@@ -12,6 +12,7 @@ import {IGovernor} from "contracts/extensions/IGovernor.sol";
 import {GovernorCountingSimpleUpgradeable} from
     "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorCountingSimpleUpgradeable.sol";
 import {ProposeUpgradeBravoToCompoundGovernor} from "script/ProposeUpgradeBravoToCompoundGovernor.s.sol";
+import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
 contract CompoundGovernorTest is Test, CompoundGovernorConstants {
     struct Proposal {
@@ -29,7 +30,7 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
     uint96 constant PROPOSAL_GUARDIAN_EXPIRY = 1_739_768_400;
 
     GovernorBravoDelegate public constant GOVERNOR_BRAVO = GovernorBravoDelegate(GOVERNOR_BRAVO_DELEGATE_ADDRESS);
-
+    address public constant GOVERNOR_BRAVO_PROXY_ADDRESS = 0x6F6e4785c97885d26466945055d4Ae8931bE6f7a;
     address public constant PROXY_ADMIN = 0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
 
     function setUp() public virtual {
@@ -456,5 +457,167 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
         _failBravoProposal(_upgradeProposalId);
     }
 
-    /* End Bravo-related helper methods */
+    /*//////////////////////////////////////////////////////////////
+                    UPGRADE COMPOUND GOVERNOR HELPERS
+    //////////////////////////////////////////////////////////////*/
+
+    // Common setup for upgrade tests
+    function _setupUpgradeTest()
+        internal
+        returns (CompoundGovernor newGovernor, CompoundGovernor governor, ICompoundTimelock timelock)
+    {
+        vm.createSelectFork(vm.envString("RPC_URL"));
+
+        // Deploy new CompoundGovernor implementation
+        newGovernor = new CompoundGovernor();
+
+        // Get the existing governor proxy address (this should be the deployed CompoundGovernor)
+        governor = CompoundGovernor(payable(GOVERNOR_PROXY_ADDRESS));
+
+        // Get the timelock from the governor
+        address timelockAddress = governor.timelock();
+        timelock = ICompoundTimelock(payable(timelockAddress));
+    }
+
+    // Create upgrade proposal
+    function _createUpgradeProposal(CompoundGovernor _newGovernor)
+        internal
+        pure
+        returns (CompoundGovernorTest.Proposal memory)
+    {
+        address[] memory _targets = new address[](1);
+        _targets[0] = PROXY_ADMIN_ADDRESS;
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            ProxyAdmin.upgradeAndCall.selector, GOVERNOR_PROXY_ADDRESS, address(_newGovernor), ""
+        );
+
+        return CompoundGovernorTest.Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Upgrade Governor from current implementation to new CompoundGovernor implementation"
+        );
+    }
+
+    // Whitelist proposer if needed
+    function _whitelistProposerIfNeeded(CompoundGovernor governor, address proposer) internal {
+        // Check if proposer is already whitelisted
+        if (governor.isWhitelisted(proposer)) {
+            return; // Already whitelisted, nothing to do
+        }
+        // For the current implementation, we need to whitelist the proposer
+        // This requires calling setWhitelistAccountExpiration through the timelock
+        uint256 expiration = block.timestamp + 365 days; // Whitelist for 1 year
+        vm.prank(TIMELOCK_ADDRESS);
+        governor.setWhitelistAccountExpiration(proposer, expiration);
+    }
+
+    // Submit and pass proposal
+    function _submitAndPassProposal(
+        CompoundGovernor governor,
+        CompoundGovernorTest.Proposal memory upgradeProposal,
+        address proposer
+    ) internal returns (uint256 _proposalId) {
+        // Propose the upgrade
+        vm.prank(proposer);
+        _proposalId = governor.propose(
+            upgradeProposal.targets, upgradeProposal.values, upgradeProposal.calldatas, upgradeProposal.description
+        );
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_DELAY + 1);
+
+        // Pass the proposal
+        for (uint256 _index = 0; _index < _majorDelegates.length; _index++) {
+            vm.prank(_majorDelegates[_index]);
+            governor.castVote(_proposalId, uint8(GovernorCountingSimpleUpgradeable.VoteType.For));
+        }
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
+
+        // Queue the proposal
+        governor.queue(_proposalId);
+    }
+
+    // Execute proposal
+    function _executeProposal(CompoundGovernor governor, ICompoundTimelock timelock, uint256 _proposalId) internal {
+        // Wait for timelock delay and execute
+        vm.warp(block.timestamp + timelock.delay() + 1);
+        governor.execute(_proposalId);
+    }
+
+    // Storage snapshot structure
+    struct StorageSnapshot {
+        uint256 votingDelay;
+        uint256 votingPeriod;
+        uint256 proposalThreshold;
+        uint256 quorum;
+        uint48 voteExtension;
+        address tokenAddress;
+        address timelockAddr;
+        address whitelistGuardianAddr;
+        address proposalGuardianAccount;
+        uint96 proposalGuardianExpiry;
+    }
+
+    // Capture storage before upgrade
+    function _captureStorageSnapshot(CompoundGovernor governor) internal view returns (StorageSnapshot memory) {
+        (address proposalGuardianAccount, uint96 proposalGuardianExpiry) = governor.proposalGuardian();
+
+        return StorageSnapshot({
+            votingDelay: governor.votingDelay(),
+            votingPeriod: governor.votingPeriod(),
+            proposalThreshold: governor.proposalThreshold(),
+            quorum: governor.quorum(block.timestamp),
+            voteExtension: governor.lateQuorumVoteExtension(),
+            tokenAddress: address(governor.token()),
+            timelockAddr: governor.timelock(),
+            whitelistGuardianAddr: governor.whitelistGuardian(),
+            proposalGuardianAccount: proposalGuardianAccount,
+            proposalGuardianExpiry: proposalGuardianExpiry
+        });
+    }
+
+    // Assert storage consistency after upgrade
+    function _assertStorageConsistency(StorageSnapshot memory before, CompoundGovernor governor) internal view {
+        StorageSnapshot memory afterSnapshot = _captureStorageSnapshot(governor);
+
+        // Core governance settings should remain unchanged
+        assertEq(before.votingDelay, afterSnapshot.votingDelay, "Voting delay changed after upgrade");
+        assertEq(before.votingPeriod, afterSnapshot.votingPeriod, "Voting period changed after upgrade");
+        assertEq(before.proposalThreshold, afterSnapshot.proposalThreshold, "Proposal threshold changed after upgrade");
+        assertEq(before.quorum, afterSnapshot.quorum, "Quorum changed after upgrade");
+        assertEq(before.voteExtension, afterSnapshot.voteExtension, "Vote extension changed after upgrade");
+
+        // Token and timelock addresses should remain unchanged
+        assertEq(before.tokenAddress, afterSnapshot.tokenAddress, "Token address changed after upgrade");
+        assertEq(before.timelockAddr, afterSnapshot.timelockAddr, "Timelock address changed after upgrade");
+
+        // Whitelist and proposal guardian settings should remain unchanged
+        assertEq(
+            before.whitelistGuardianAddr,
+            afterSnapshot.whitelistGuardianAddr,
+            "Whitelist guardian changed after upgrade"
+        );
+        assertEq(
+            before.proposalGuardianAccount,
+            afterSnapshot.proposalGuardianAccount,
+            "Proposal guardian account changed after upgrade"
+        );
+        assertEq(
+            before.proposalGuardianExpiry,
+            afterSnapshot.proposalGuardianExpiry,
+            "Proposal guardian expiry changed after upgrade"
+        );
+    }
+
+    // Verify basic functionality after upgrade
+    function _verifyBasicFunctionality(CompoundGovernor governor) internal view {
+        assertTrue(address(governor.token()) != address(0), "Token address should not be zero");
+        assertTrue(governor.timelock() != address(0), "Timelock address should not be zero");
+        assertTrue(governor.votingDelay() > 0, "Voting delay should be greater than zero");
+        assertTrue(governor.votingPeriod() > 0, "Voting period should be greater than zero");
+    }
 }

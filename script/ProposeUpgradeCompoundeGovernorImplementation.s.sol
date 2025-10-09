@@ -32,12 +32,24 @@ contract ProposeUpgradeCompoundeGovernorImplementation is
         (address _proposalGuardian, ) = governor.proposalGuardian();
         // Prepare addresses for batchWhitelist call
         // First address must be proposalGuardian (COMMUNITY_MULTISIG_ADDRESS)
-        address[] memory _initProposers = new address[](5);
+        address[] memory _initProposers = new address[](13);
         _initProposers[0] = _proposalGuardian; // proposalGuardian
-        _initProposers[1] = _majorDelegates[0]; // a16z
-        _initProposers[2] = _majorDelegates[1]; // Second major delegate
-        _initProposers[3] = _majorDelegates[2]; // Geoffrey Hayes
-        _initProposers[4] = _majorDelegates[3]; // Gauntlet
+        _initProposers[1] = 0xb06DF4dD01a5c5782f360aDA9345C87E86ADAe3D; // Compound Foundation
+        _initProposers[2] = 0xd2A79F263eC55DBC7B724eCc20FC7448D4795a0C; // WOOF!
+        _initProposers[3] = 0x3FB19771947072629C8EEE7995a2eF23B72d4C8A; // PGov
+        _initProposers[4] = 0x0579A616689f7ed748dC07692A3F150D44b0CA09; // Arana
+        _initProposers[5] = 0x683a4F9915D6216f73d6Df50151725036bD26C02; // Gauntlet
+        _initProposers[6] = 0xB49f8b8613bE240213C1827e2E576044fFEC7948; // Avantgarde
+        _initProposers[7] = 0x13BDaE8c5F0fC40231F0E6A4ad70196F59138548; // Michigan Blockchain
+        _initProposers[8] = 0x070341aA5Ed571f0FB2c4a5641409B1A46b4961b; // FranklinDAO
+        _initProposers[9] = 0x66cD62c6F8A4BB0Cd8720488BCBd1A6221B765F9; // allthecolors
+        _initProposers[10] = 0x2B384212EDc04Ae8bB41738D05BA20E33277bf33; // Arr00
+        _initProposers[11] = 0xB933AEe47C438f22DE0747D57fc239FE37878Dd1; // Wintermute
+
+        /*//////////////////////////////////////////////////////////////
+                                    PENDING
+        //////////////////////////////////////////////////////////////*/
+        _initProposers[12] = 0x9AA835Bc7b8cE13B9B0C9764A52FbF71AC62cCF1; // a16z
 
         // Encode the batchWhitelist call data
         bytes memory _batchWhitelistCalldata = abi.encodeWithSelector(
@@ -65,12 +77,20 @@ contract ProposeUpgradeCompoundeGovernorImplementation is
         "The upgrade will:\n"
         "- Deploy a new CompoundGovernor implementation contract\n"
         "- Update the proxy to point to the new implementation\n"
-        "- Initialize the allowed proposers list with 5 addresses:\n"
-        "  * Community Multisig (proposal guardian)\n"
-        "  * a16z\n"
-        "  * Major delegate #2\n"
-        "  * Geoffrey Hayes\n"
-        "  * Gauntlet\n"
+        "- Initialize the allowed proposers list with 13 addresses:\n"
+        "  * Proposal Guardian (current guardian address)\n"
+        "  * Compound Foundation (0xb06DF4dD01a5c5782f360aDA9345C87E86ADAe3D)\n"
+        "  * WOOF! (0xd2A79F263eC55DBC7B724eCc20FC7448D4795a0C)\n"
+        "  * PGov (0x3FB19771947072629C8EEE7995a2eF23B72d4C8A)\n"
+        "  * Arana (0x0579A616689f7ed748dC07692A3F150D44b0CA09)\n"
+        "  * Gauntlet (0x683a4F9915D6216f73d6Df50151725036bD26C02)\n"
+        "  * Avantgarde (0xB49f8b8613bE240213C1827e2E576044fFEC7948)\n"
+        "  * Michigan Blockchain (0x13BDaE8c5F0fC40231F0E6A4ad70196F59138548)\n"
+        "  * FranklinDAO (0x070341aA5Ed571f0FB2c4a5641409B1A46b4961b)\n"
+        "  * allthecolors (0x66cD62c6F8A4BB0Cd8720488BCBd1A6221B765F9)\n"
+        "  * Arr00 (0x2B384212EDc04Ae8bB41738D05BA20E33277bf33)\n"
+        "  * Wintermute (0xB933AEe47C438f22DE0747D57fc239FE37878Dd1)\n"
+        "  * a16z (0x9AA835Bc7b8cE13B9B0C9764A52FbF71AC62cCF1)\n"
         "- Preserve all existing storage and state\n"
         "- Maintain all current governance parameters and settings\n\n"
         "This upgrade includes the new allowed proposers system that replaces the whitelist\n"

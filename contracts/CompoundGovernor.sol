@@ -34,10 +34,13 @@ contract CompoundGovernor is
     /// @dev To use the `EnumerableSet` library for managing a set of addresses.
     using EnumerableSet for EnumerableSet.AddressSet;
 
-    /// @notice Emitted when the expiration of a whitelisted account is set or updated.
-    /// @param account The address of the account being whitelisted.
-    /// @param expiration The timestamp until which the account is whitelisted.
-    event WhitelistAccountExpirationSet(address account, uint256 expiration);
+    /**
+     * @notice Emitted when the expiration of a whitelisted account is set or updated.
+     * @param setter The address of the account that set the expiration.
+     * @param account The address of the account being whitelisted.
+     * @param expiration The timestamp until which the account is whitelisted.
+     */
+    event WhitelistAccountExpirationSet(address setter, address account, uint256 expiration);
 
     /// @notice Emitted when the whitelistGuardian is set or changed.
     /// @param oldGuardian The address of the previous whitelistGuardian.
@@ -391,8 +394,9 @@ contract CompoundGovernor is
      * @param _expiration The timestamp until which the account will be whitelisted.
      */
     function setWhitelistAccountExpiration(address _account, uint256 _expiration) external {
+        address _sender = _msgSender();
         // Check that msg.sender is in allowedProposers
-        if (!allowedProposers.contains(_msgSender())) {
+        if (!allowedProposers.contains(_sender)) {
             revert OnlyAllowedProposers();
         }
 
@@ -417,7 +421,7 @@ contract CompoundGovernor is
         }
 
         whitelistAccountExpirations[_account] = _expiration;
-        emit WhitelistAccountExpirationSet(_account, _expiration);
+        emit WhitelistAccountExpirationSet(_sender, _account, _expiration);
     }
 
     /**
@@ -581,20 +585,18 @@ contract CompoundGovernor is
      */
     function _setProposalGuardian(ProposalGuardian memory _newProposalGuardian) internal {
         address currentProposalGuardian = proposalGuardian.account;
+        address newProposalGuardian = _newProposalGuardian.account;
         emit ProposalGuardianSet(
-            currentProposalGuardian,
-            proposalGuardian.expiration,
-            _newProposalGuardian.account,
-            _newProposalGuardian.expiration
+            currentProposalGuardian, proposalGuardian.expiration, newProposalGuardian, _newProposalGuardian.expiration
         );
 
         /// Note If batchWhitelist was not called during upgrade, we check that the current proposal guardian is in the
         /// allowed proposers
-        if (currentProposalGuardian != _newProposalGuardian.account) {
+        if (currentProposalGuardian != newProposalGuardian) {
             if (isAllowedProposer(currentProposalGuardian)) {
                 allowedProposers.remove(currentProposalGuardian);
             }
-            allowedProposers.add(_newProposalGuardian.account);
+            allowedProposers.add(newProposalGuardian);
         }
 
         proposalGuardian = _newProposalGuardian;

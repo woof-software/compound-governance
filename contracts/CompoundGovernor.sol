@@ -236,7 +236,7 @@ contract CompoundGovernor is
 
         // Check for zero addresses and duplicates
         address proposer;
-        for (uint256 i; i < _initProposers.length;) {
+        for (uint256 i; i < _initProposers.length; ++i) {
             proposer = _initProposers[i];
 
             if (proposer == address(0)) {
@@ -247,8 +247,6 @@ contract CompoundGovernor is
             }
 
             emit ProposerAdded(proposer);
-
-            ++i;
         }
     }
 
@@ -405,14 +403,14 @@ contract CompoundGovernor is
             revert ZeroAddress();
         }
 
-        // Check that _account is not in allowedProposers
-        if (allowedProposers.contains(_account)) {
-            revert AlreadySet(_account);
-        }
-
         // Check that _account is not equal to proposalGuardian
         if (_account == proposalGuardian.account) {
             revert IsProposalGuardian(_account);
+        }
+
+        // Check that _account is not in allowedProposers
+        if (allowedProposers.contains(_account)) {
+            revert AlreadySet(_account);
         }
 
         // If expiration is not less than now, check the lifetime constraint
@@ -593,9 +591,7 @@ contract CompoundGovernor is
         /// Note If batchWhitelist was not called during upgrade, we check that the current proposal guardian is in the
         /// allowed proposers
         if (currentProposalGuardian != newProposalGuardian) {
-            if (isAllowedProposer(currentProposalGuardian)) {
-                allowedProposers.remove(currentProposalGuardian);
-            }
+            allowedProposers.remove(currentProposalGuardian);
             allowedProposers.add(newProposalGuardian);
         }
 

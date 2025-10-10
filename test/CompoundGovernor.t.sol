@@ -25,9 +25,10 @@ contract Initialize is CompoundGovernorTest {
         assertEq(_proposalGuardian, proposalGuardian.account);
         assertEq(_expiration, proposalGuardian.expiration);
 
-        // Check that allowedProposers is empty initially
+        // We expect that length of allowedProposers is 1 because the proposal guardian is added to the list during setting up the proposal guardian
         address[] memory _allowedProposers = governor.getAllowedProposers();
-        assertEq(_allowedProposers.length, 0);
+        assertEq(_allowedProposers.length, 1);
+        assertEq(_allowedProposers[0], _proposalGuardian);
     }
 }
 
@@ -53,7 +54,7 @@ contract SetQuorum is CompoundGovernorTest {
     function testFuzz_SetsQuorum(uint256 _newQuorum) public {
         _newQuorum = bound(_newQuorum, 1, INITIAL_QUORUM * 10);
         Proposal memory _proposal = _buildSetQuorumProposal(_newQuorum);
-        _submitPassQueueAndExecuteProposal(_getRandomProposer(), _proposal);
+        _submitPassQueueAndExecuteProposal(proposalGuardian.account, _proposal);
         assertEq(governor.quorum(block.timestamp), _newQuorum);
     }
 
@@ -63,7 +64,7 @@ contract SetQuorum is CompoundGovernorTest {
         vm.assume(_newQuorum != INITIAL_QUORUM);
         _newQuorum = bound(_newQuorum, 1, INITIAL_QUORUM * 10);
         Proposal memory _proposal = _buildSetQuorumProposal(_newQuorum);
-        _submitAndFailProposal(_getRandomProposer(), _proposal);
+        _submitAndFailProposal(proposalGuardian.account, _proposal);
         assertEq(governor.quorum(block.timestamp), INITIAL_QUORUM);
     }
 
@@ -73,6 +74,7 @@ contract SetQuorum is CompoundGovernorTest {
     ) public {
         vm.assume(_caller != address(timelock));
         vm.assume(_caller != PROXY_ADMIN_ADDRESS);
+        vm.assume(_caller != 0x08af690B4bd347c13BA57D7731b277f5d3D7434A); // proxyAdmin address
         vm.prank(_caller);
         _newQuorum = bound(_newQuorum, 1, INITIAL_QUORUM * 10);
         vm.expectRevert(
@@ -572,26 +574,25 @@ abstract contract Queue is CompoundGovernorTest {
     }
 
     function testFuzz_RevertIf_ProposalIsExecuted(address _actor) public {
-        if (_actor != address(0)) {
-            vm.assume(_actor != PROXY_ADMIN_ADDRESS);
-            _addToAllowedProposers(_actor);
-            Proposal memory _proposal = _buildAnEmptyProposal();
-            uint256 _proposalId = _submitPassQueueAndExecuteProposal(
-                _actor,
-                _proposal
-            );
+        vm.assume(_actor != address(0));
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        _addToAllowedProposers(_actor);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassQueueAndExecuteProposal(
+            _actor,
+            _proposal
+        );
 
-            vm.expectRevert(
-                abi.encodeWithSelector(
-                    IGovernor.GovernorUnexpectedProposalState.selector,
-                    _proposalId,
-                    IGovernor.ProposalState.Executed,
-                    _encodeStateBitmap(IGovernor.ProposalState.Succeeded)
-                )
-            );
-            vm.prank(_actor);
-            _queueWithProposalDetailsOrId(_proposal, _proposalId);
-        }
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Executed,
+                _encodeStateBitmap(IGovernor.ProposalState.Succeeded)
+            )
+        );
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
     }
 }
 
@@ -1879,7 +1880,7 @@ contract AllowedProposers is CompoundGovernorTest {
         address _newProposer = makeAddr("newProposer");
         uint256 _initialLength = governor.getAllowedProposers().length;
 
-        assert(_initialLength == 0);
+        assert(_initialLength == 1); // proposal guardian is added to the list during setup
 
         // Bootstrap: directly add a major delegate through timelock
         vm.prank(TIMELOCK_ADDRESS);
@@ -2020,7 +2021,7 @@ contract AllowedProposers is CompoundGovernorTest {
         // Verify we now have MIN_PROPOSERS
         assertEq(
             governor.getAllowedProposers().length,
-            governor.MIN_PROPOSERS()
+            governor.MIN_PROPOSERS() + 1 // proposal guardian is added to the list during setup
         );
     }
 

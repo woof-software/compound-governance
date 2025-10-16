@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.26;
 
-import { CompoundGovernorTest } from "test/helpers/CompoundGovernorTest.sol";
+import { CompoundGovernorTest } from "./helpers/CompoundGovernorTest.sol";
 import { IGovernor } from "contracts/extensions/IGovernor.sol";
 import { GovernorAlphaInterface } from "contracts/GovernorBravoInterfaces.sol";
 

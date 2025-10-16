@@ -1,6 +1,9 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { getTypedDomainComp, getDelegationTypes } from "./governanceHelpers";
+import {
+  getTypedDomainComp,
+  getDelegationTypes,
+} from "./helpers/governanceHelpers";
 import {
   loadFixture,
   time,

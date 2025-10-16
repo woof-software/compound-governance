@@ -18,11 +18,11 @@ import {
   getProposeTypes,
   ProposalState,
   proposeAndExecute,
-} from "./governanceHelpers";
+} from "./helpers/governanceHelpers";
 import {
   GovernorBravoDelegate,
   GovernorBravoDelegator,
-} from "../typechain-types";
+} from "../../typechain-types";
 
 describe("Governor Bravo", function () {
   async function deployFixtures() {

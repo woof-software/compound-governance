@@ -37,6 +37,9 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
     address public constant GOVERNOR_BRAVO_PROXY_ADDRESS =
         0x6F6e4785c97885d26466945055d4Ae8931bE6f7a;
 
+    address public constant PROXY_ADMIN_TESTING =
+        0x08af690B4bd347c13BA57D7731b277f5d3D7434A;
+
     function setUp() public virtual {
         // set the RPC URL and the fork block number to create a local execution fork for testing
         vm.createSelectFork(
@@ -642,22 +645,22 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
     function _setupUpgradeTest()
         internal
         returns (
-            CompoundGovernor newGovernor,
-            CompoundGovernor governor,
-            ICompoundTimelock timelock
+            CompoundGovernor newGovernor_,
+            CompoundGovernor governor_,
+            ICompoundTimelock timelock_
         )
     {
         vm.createSelectFork(vm.envString("RPC_URL"));
 
         // Deploy new CompoundGovernor implementation
-        newGovernor = new CompoundGovernor();
+        newGovernor_ = new CompoundGovernor();
 
         // Get the existing governor proxy address (this should be the deployed CompoundGovernor)
-        governor = CompoundGovernor(payable(GOVERNOR_PROXY_ADDRESS));
+        governor_ = CompoundGovernor(payable(GOVERNOR_PROXY_ADDRESS));
 
         // Get the timelock from the governor
-        address timelockAddress = governor.timelock();
-        timelock = ICompoundTimelock(payable(timelockAddress));
+        address timelockAddress = governor_.timelock();
+        timelock_ = ICompoundTimelock(payable(timelockAddress));
     }
 
     // Create upgrade proposal
@@ -689,40 +692,40 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
 
     // Whitelist proposer if needed
     function _whitelistProposerIfNeeded(
-        CompoundGovernor governor,
-        address proposer
+        CompoundGovernor governor_,
+        address proposer_
     ) internal {
         // Check if proposer is already whitelisted
-        if (governor.isWhitelisted(proposer)) {
+        if (governor_.isWhitelisted(proposer_)) {
             return; // Already whitelisted, nothing to do
         }
         // For the current implementation, we need to whitelist the proposer
         // This requires calling setWhitelistAccountExpiration through the timelock
         uint256 expiration = block.timestamp + 365 days; // Whitelist for 1 year
         vm.prank(TIMELOCK_ADDRESS);
-        governor.setWhitelistAccountExpiration(proposer, expiration);
+        governor_.setWhitelistAccountExpiration(proposer_, expiration);
     }
 
     // Submit and pass proposal
     function _submitAndPassProposal(
-        CompoundGovernor governor,
-        CompoundGovernorTest.Proposal memory upgradeProposal,
-        address proposer
+        CompoundGovernor governor_,
+        CompoundGovernorTest.Proposal memory upgradeProposal_,
+        address proposer_
     ) internal returns (uint256 _proposalId) {
         // Propose the upgrade
-        vm.prank(proposer);
-        _proposalId = governor.propose(
-            upgradeProposal.targets,
-            upgradeProposal.values,
-            upgradeProposal.calldatas,
-            upgradeProposal.description
+        vm.prank(proposer_);
+        _proposalId = governor_.propose(
+            upgradeProposal_.targets,
+            upgradeProposal_.values,
+            upgradeProposal_.calldatas,
+            upgradeProposal_.description
         );
         vm.roll(vm.getBlockNumber() + INITIAL_VOTING_DELAY + 1);
 
         // Pass the proposal
         for (uint256 _index = 0; _index < _majorDelegates.length; _index++) {
             vm.prank(_majorDelegates[_index]);
-            governor.castVote(
+            governor_.castVote(
                 _proposalId,
                 uint8(GovernorCountingSimpleUpgradeable.VoteType.For)
             );
@@ -730,18 +733,18 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
         vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
 
         // Queue the proposal
-        governor.queue(_proposalId);
+        governor_.queue(_proposalId);
     }
 
     // Execute proposal
     function _executeProposal(
-        CompoundGovernor governor,
-        ICompoundTimelock timelock,
-        uint256 _proposalId
+        CompoundGovernor governor_,
+        ICompoundTimelock timelock_,
+        uint256 proposalId_
     ) internal {
         // Wait for timelock delay and execute
-        vm.warp(block.timestamp + timelock.delay() + 1);
-        governor.execute(_proposalId);
+        vm.warp(block.timestamp + timelock_.delay() + 1);
+        governor_.execute(proposalId_);
     }
 
     // Storage snapshot structure
@@ -760,23 +763,23 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
 
     // Capture storage before upgrade
     function _captureStorageSnapshot(
-        CompoundGovernor governor
+        CompoundGovernor governor_
     ) internal view returns (StorageSnapshot memory) {
         (
             address proposalGuardianAccount,
             uint96 proposalGuardianExpiry
-        ) = governor.proposalGuardian();
+        ) = governor_.proposalGuardian();
 
         return
             StorageSnapshot({
-                votingDelay: governor.votingDelay(),
-                votingPeriod: governor.votingPeriod(),
-                proposalThreshold: governor.proposalThreshold(),
-                quorum: governor.quorum(block.timestamp),
-                voteExtension: governor.lateQuorumVoteExtension(),
-                tokenAddress: address(governor.token()),
-                timelockAddr: governor.timelock(),
-                whitelistGuardianAddr: governor.whitelistGuardian(),
+                votingDelay: governor_.votingDelay(),
+                votingPeriod: governor_.votingPeriod(),
+                proposalThreshold: governor_.proposalThreshold(),
+                quorum: governor_.quorum(block.timestamp),
+                voteExtension: governor_.lateQuorumVoteExtension(),
+                tokenAddress: address(governor_.token()),
+                timelockAddr: governor_.timelock(),
+                whitelistGuardianAddr: governor_.whitelistGuardian(),
                 proposalGuardianAccount: proposalGuardianAccount,
                 proposalGuardianExpiry: proposalGuardianExpiry
             });
@@ -785,10 +788,10 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
     // Assert storage consistency after upgrade
     function _assertStorageConsistency(
         StorageSnapshot memory before,
-        CompoundGovernor governor
+        CompoundGovernor governor_
     ) internal view {
         StorageSnapshot memory afterSnapshot = _captureStorageSnapshot(
-            governor
+            governor_
         );
 
         // Core governance settings should remain unchanged
@@ -850,22 +853,22 @@ contract CompoundGovernorTest is Test, CompoundGovernorConstants {
 
     // Verify basic functionality after upgrade
     function _verifyBasicFunctionality(
-        CompoundGovernor governor
+        CompoundGovernor governor_
     ) internal view {
         assertTrue(
-            address(governor.token()) != address(0),
+            address(governor_.token()) != address(0),
             "Token address should not be zero"
         );
         assertTrue(
-            governor.timelock() != address(0),
+            governor_.timelock() != address(0),
             "Timelock address should not be zero"
         );
         assertTrue(
-            governor.votingDelay() > 0,
+            governor_.votingDelay() > 0,
             "Voting delay should be greater than zero"
         );
         assertTrue(
-            governor.votingPeriod() > 0,
+            governor_.votingPeriod() > 0,
             "Voting period should be greater than zero"
         );
     }

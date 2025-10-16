@@ -22,6 +22,7 @@ contract CompoundGovernorConstants {
     // The address of the proxy admin
     address constant PROXY_ADMIN_ADDRESS =
         0x725ED7F44F0888aeC1b7630AB1ACdced91E0591A;
+
     // Current proposal guardian.
     address constant COMMUNITY_MULTISIG_ADDRESS =
         0xbbf3f1421D886E9b2c5D716B5192aC998af2012c;

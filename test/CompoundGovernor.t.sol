@@ -7,13 +7,11 @@ import { CompoundGovernor } from "contracts/CompoundGovernor.sol";
 import { GovernorCountingFractionalUpgradeable } from "contracts/extensions/GovernorCountingFractionalUpgradeable.sol";
 import { ICompoundTimelock } from "@openzeppelin/contracts/vendor/compound/ICompoundTimelock.sol";
 import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
-
-import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
-import { console } from "forge-std/console.sol";
-import { ICompoundTimelock } from "lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/vendor/compound/ICompoundTimelock.sol";
 import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
-import { ITransparentUpgradeableProxy } from "lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
-import { Initializable } from "lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
+import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
+import { ICompoundTimelock } from "@openzeppelin/contracts/vendor/compound/ICompoundTimelock.sol";
+import { ITransparentUpgradeableProxy } from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import { Initializable } from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import { GovernorCountingSimpleUpgradeable } from "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorCountingSimpleUpgradeable.sol";
 
 contract Initialize is CompoundGovernorTest {

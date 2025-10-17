@@ -5,7 +5,7 @@ import {
   propose,
   getVoteWithReasonTypes,
   getTypedDomain,
-} from "./governanceHelpers";
+} from "./helpers/governanceHelpers";
 import {
   mine,
   reset,

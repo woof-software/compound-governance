@@ -6,7 +6,7 @@ import {
   GovernorAlpha,
   GovernorBravoDelegate,
   Timelock,
-} from "../typechain-types";
+} from "../../../typechain-types";
 
 /**
  * Propose and fast forward to voting period of given governor

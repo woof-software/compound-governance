@@ -1,7 +1,7 @@
 import { loadFixture, time } from "@nomicfoundation/hardhat-network-helpers";
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { Timelock } from "../typechain-types";
+import { Timelock } from "../../typechain-types";
 import { AddressLike } from "ethers";
 
 describe("Timelock", function () {

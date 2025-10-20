@@ -442,7 +442,7 @@ contract CompoundGovernor is
             if (_sender != proposalGuardian.account) {
                 revert GovernorOnlyExecutor(_sender);
             }
-            if (allowedProposers.length() > MIN_PROPOSERS) {
+            if (allowedProposers.length() >= MIN_PROPOSERS) {
                 revert MinProposersReached();
             }
         }

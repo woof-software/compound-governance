@@ -1909,16 +1909,7 @@ contract AllowedProposers is CompoundGovernorTest {
     }
 
     function test_RevertIf_ProposalGuardianCannotBeAdded() public {
-        // First batch whitelist the proposal guardian
-        address[] memory _proposers = new address[](1);
-        _proposers[0] = proposalGuardian.account;
-
-        vm.prank(PROXY_ADMIN);
-        governor.batchWhitelist(_proposers);
-
         (address proposalGuardian, ) = governor.proposalGuardian();
-
-        assert(proposalGuardian == _proposers[0]);
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -1931,20 +1922,33 @@ contract AllowedProposers is CompoundGovernorTest {
         governor.addProposer(proposalGuardian);
     }
 
-    function test_RevertIf_LengthCannotBeLessThanMinProposers() public {
+    function testFork_RevertIf_LengthCannotBeLessThanMinProposers() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        (address proposalGuardian, ) = governor.proposalGuardian();
+
         // First batch whitelist the proposal guardian
         address[] memory _proposers = new address[](5);
-        _proposers[0] = proposalGuardian.account;
+        _proposers[0] = proposalGuardian;
         _proposers[1] = makeAddr("proposer1");
         _proposers[2] = makeAddr("proposer2");
         _proposers[3] = makeAddr("proposer3");
         _proposers[4] = makeAddr("proposer4");
 
-        vm.prank(PROXY_ADMIN);
-        governor.batchWhitelist(_proposers);
+        assertEq(_proposers.length, newGovernor.MIN_PROPOSERS());
 
-        uint256 currentLength = governor.getAllowedProposers().length;
-        assert(currentLength == 5);
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -1956,21 +1960,20 @@ contract AllowedProposers is CompoundGovernorTest {
     }
 
     function test_RevertIf_RemovalOfProposalGuardianIsImpossible() public {
-        // First batch whitelist the proposal guardian
-        address[] memory _proposers = new address[](1);
-        _proposers[0] = proposalGuardian.account;
-        vm.prank(PROXY_ADMIN);
-        governor.batchWhitelist(_proposers);
+        address _proposalGuardian = proposalGuardian.account;
+
+        // We expect that the proposal guardian is already in the allowed proposers list
+        assertTrue(governor.isAllowedProposer(_proposalGuardian));
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 CompoundGovernor.IsProposalGuardian.selector,
-                proposalGuardian.account
+                _proposalGuardian
             )
         );
 
         vm.prank(TIMELOCK_ADDRESS);
-        governor.removeProposer(proposalGuardian.account);
+        governor.removeProposer(_proposalGuardian);
     }
 
     function test_RevertIf_ZeroAddressForAdd() public {
@@ -2006,8 +2009,11 @@ contract AllowedProposers is CompoundGovernorTest {
     function test_ProposalGuardianCanAddMultipleProposersWhenBelowMinimum()
         public
     {
+        // We expect that during setup, the proposal guardian is added to the allowed proposers list so we start with 1
+        assertEq(governor.getAllowedProposers().length, 1);
+
         // Add proposers one by one until we reach MIN_PROPOSERS
-        for (uint256 i = 0; i < governor.MIN_PROPOSERS(); i++) {
+        for (uint256 i = 0; i < governor.MIN_PROPOSERS() - 1; i++) {
             address _newProposer = makeAddr(
                 string(abi.encodePacked("proposer", i))
             );
@@ -2021,7 +2027,7 @@ contract AllowedProposers is CompoundGovernorTest {
         // Verify we now have MIN_PROPOSERS
         assertEq(
             governor.getAllowedProposers().length,
-            governor.MIN_PROPOSERS() + 1 // proposal guardian is added to the list during setup
+            governor.MIN_PROPOSERS()
         );
     }
 
@@ -2049,8 +2055,11 @@ contract AllowedProposers is CompoundGovernorTest {
     function test_RevertIf_ProposalGuardianTriesToAddProposerWhenAboveMinimum()
         public
     {
+        uint256 _currentLength = governor.getAllowedProposers().length;
+        assertTrue(_currentLength == 1); // proposal guardian is added to the list during setup
+
         // First, add enough proposers to reach MIN_PROPOSERS
-        for (uint256 i = 0; i <= governor.MIN_PROPOSERS(); i++) {
+        for (uint256 i = _currentLength; i < governor.MIN_PROPOSERS(); i++) {
             address _newProposer = makeAddr(
                 string(abi.encodePacked("proposer", i))
             );
@@ -2060,6 +2069,14 @@ contract AllowedProposers is CompoundGovernorTest {
 
         // Now proposal guardian should not be able to add more
         address _extraProposer = makeAddr("extraProposer");
+
+        uint256 _newAllowedProposersLength = governor
+            .getAllowedProposers()
+            .length;
+        assertTrue(
+            _newAllowedProposersLength == governor.MIN_PROPOSERS(),
+            "Min proposers not reached"
+        );
 
         vm.prank(proposalGuardian.account);
         vm.expectRevert(

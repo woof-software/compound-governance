@@ -7,12 +7,19 @@
     "node": ">=10.4.0"
   },
   "scripts": {
-    "test": "hardhat test",
-    "coverage": "hardhat coverage",
-    "build": "hardhat compile",
+    "buildh": "hardhat compile",
+    "buildf": "forge build",
+    "testh": "hardhat test",
+    "testf": "forge test",
+    "coverageh": "hardhat coverage",
+    "coveragef": "forge coverage",
+    "clean": "npx hardhat clean && forge clean && rm -rf artifacts && rm -rf cache",
     "lint:fix": "prettier --write {*.{js,ts},**/*.{sol,js,ts}} && eslint --fix . --ext js,ts",
     "lint:check": "concurrently \"prettier --check {*.{js,ts},**/*.{sol,js,ts}}\" \"eslint . --ext js,ts\"",
-    "prepare": "husky install"
+    "prepare": "husky install",
+    "slither": "forge clean && forge build && slither contracts/ --foundry-out-directory artifacts/ --foundry-compile-all --checklist > SLITHER_REPORT.md",
+    "aderyn": "npx aderyn --src contracts/ -o ADERYN_REPORT.md",
+    "gen:docs": "forge doc -o docs/ -b"
   },
   "devDependencies": {
     "@compound-finance/hardhat-match": "^1.0.0",

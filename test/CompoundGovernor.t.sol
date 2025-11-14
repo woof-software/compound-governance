@@ -1,0 +1,3160 @@
+// SPDX-License-Identifier: BSD-3-Clause
+pragma solidity 0.8.26;
+
+import { CompoundGovernorTest } from "test/helpers/CompoundGovernorTest.sol";
+import { IGovernor } from "contracts/extensions/IGovernor.sol";
+import { CompoundGovernor } from "contracts/CompoundGovernor.sol";
+import { GovernorCountingFractionalUpgradeable } from "contracts/extensions/GovernorCountingFractionalUpgradeable.sol";
+import { ICompoundTimelock } from "@openzeppelin/contracts/vendor/compound/ICompoundTimelock.sol";
+import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
+
+import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
+
+contract Initialize is CompoundGovernorTest {
+    function test_Initialize() public view {
+        assertEq(governor.quorum(governor.clock()), INITIAL_QUORUM);
+        assertEq(governor.votingPeriod(), INITIAL_VOTING_PERIOD);
+        assertEq(governor.votingDelay(), INITIAL_VOTING_DELAY);
+        assertEq(governor.proposalThreshold(), INITIAL_PROPOSAL_THRESHOLD);
+        assertEq(governor.lateQuorumVoteExtension(), INITIAL_VOTE_EXTENSION);
+        assertEq(address(governor.timelock()), TIMELOCK_ADDRESS);
+        assertEq(address(governor.token()), COMP_TOKEN_ADDRESS);
+        assertEq(governor.whitelistGuardian(), whitelistGuardian);
+        (address _proposalGuardian, uint96 _expiration) = governor
+            .proposalGuardian();
+        assertEq(_proposalGuardian, proposalGuardian.account);
+        assertEq(_expiration, proposalGuardian.expiration);
+
+        // We expect that length of allowedProposers is 1 because the proposal guardian is added to the list during setting up the proposal guardian
+        address[] memory _allowedProposers = governor.getAllowedProposers();
+        assertEq(_allowedProposers.length, 1);
+        assertEq(_allowedProposers[0], _proposalGuardian);
+    }
+}
+
+contract SetQuorum is CompoundGovernorTest {
+    function _buildSetQuorumProposal(
+        uint256 _amount
+    ) private view returns (Proposal memory _proposal) {
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = _buildProposalData(
+            "setQuorum(uint256)",
+            abi.encode(_amount)
+        );
+
+        _proposal = Proposal(_targets, _values, _calldatas, "Set New Quorum");
+    }
+
+    function testFuzz_SetsQuorum(uint256 _newQuorum) public {
+        _newQuorum = bound(_newQuorum, 1, INITIAL_QUORUM * 10);
+        Proposal memory _proposal = _buildSetQuorumProposal(_newQuorum);
+        _submitPassQueueAndExecuteProposal(proposalGuardian.account, _proposal);
+        assertEq(governor.quorum(block.timestamp), _newQuorum);
+    }
+
+    function testFuzz_DoesNotUpdateWhenProposalFails(
+        uint256 _newQuorum
+    ) public {
+        vm.assume(_newQuorum != INITIAL_QUORUM);
+        _newQuorum = bound(_newQuorum, 1, INITIAL_QUORUM * 10);
+        Proposal memory _proposal = _buildSetQuorumProposal(_newQuorum);
+        _submitAndFailProposal(proposalGuardian.account, _proposal);
+        assertEq(governor.quorum(block.timestamp), INITIAL_QUORUM);
+    }
+
+    function testFuzz_RevertIf_CalledByNonTimelock(
+        address _caller,
+        uint256 _newQuorum
+    ) public {
+        vm.assume(_caller != address(timelock));
+        vm.assume(_caller != PROXY_ADMIN_ADDRESS);
+        vm.assume(_caller != 0x08af690B4bd347c13BA57D7731b277f5d3D7434A); // proxyAdmin address
+        vm.prank(_caller);
+        _newQuorum = bound(_newQuorum, 1, INITIAL_QUORUM * 10);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorOnlyExecutor.selector,
+                _caller
+            )
+        );
+        governor.setQuorum(_newQuorum);
+    }
+}
+
+contract Propose is CompoundGovernorTest {
+    function test_WhitelistedAccountCanProposeWithTemporaryWhitelist() public {
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_getRandomProposer()); // Add someone to allowed proposers so they can whitelist others
+        _setWhitelistedProposerViaAllowedProposer(_proposer);
+        uint256 _proposalId = _getProposalId(_proposal);
+
+        assertTrue(governor.isWhitelisted(_proposer));
+        assertFalse(governor.isAllowedProposer(_proposer));
+
+        _submitProposal(_proposer, _proposal);
+        vm.assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Active)
+        );
+    }
+
+    function test_AllowedProposerCanCallProposeTwice() public {
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // First proposal
+        uint256 _proposalId1 = _submitProposal(_proposer, _proposal);
+        vm.assertEq(
+            uint8(governor.state(_proposalId1)),
+            uint8(IGovernor.ProposalState.Active)
+        );
+
+        // Wait for voting period to end
+        vm.roll(vm.getBlockNumber() + governor.votingPeriod() + 1);
+
+        // Second proposal
+        _proposal.description = "second proposal";
+        uint256 _proposalId2 = _submitProposal(_proposer, _proposal);
+        vm.assertEq(
+            uint8(governor.state(_proposalId2)),
+            uint8(IGovernor.ProposalState.Active)
+        );
+    }
+
+    function testFuzz_ProposerCanSubmitAnotherProposalAfterVotingPeriod(
+        uint256 _elapsedBlocks
+    ) public {
+        _elapsedBlocks = bound(
+            _elapsedBlocks,
+            governor.votingDelay() + governor.votingPeriod() + 1,
+            type(uint32).max
+        );
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        _submitProposalWithoutRoll(_proposer, _proposal);
+        vm.roll(vm.getBlockNumber() + _elapsedBlocks);
+        _proposal.description = "second proposal";
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        vm.assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Active)
+        );
+    }
+
+    function test_RevertIf_NotWhitelistedAndNotAllowedProposer() public {
+        address _proposer = _getRandomProposer();
+        vm.assume(!governor.isAllowedProposer(_proposer));
+        vm.assume(!governor.isWhitelisted(_proposer));
+        Proposal memory _proposal = _buildAnEmptyProposal();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorNotWhitelisted.selector,
+                _proposer
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_EmitsProposalCreatedEvent() public {
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        uint256 _proposalId = _getProposalId(_proposal);
+
+        vm.expectEmit();
+        emit IGovernor.ProposalCreated(
+            _proposalId,
+            _proposer,
+            _proposal.targets,
+            _proposal.values,
+            new string[](_proposal.targets.length),
+            _proposal.calldatas,
+            block.number + INITIAL_VOTING_DELAY,
+            block.number + INITIAL_VOTING_DELAY + INITIAL_VOTING_PERIOD,
+            _proposal.description
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function testFuzz_RevertIf_ProposerHasActiveProposal(
+        uint256 _elapsedBlocks
+    ) public {
+        _elapsedBlocks = bound(
+            _elapsedBlocks,
+            0,
+            governor.votingDelay() + governor.votingPeriod()
+        );
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        uint256 _proposalId = _submitProposalWithoutRoll(_proposer, _proposal);
+        vm.roll(vm.getBlockNumber() + _elapsedBlocks);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.ProposerActiveProposal.selector,
+                _proposer,
+                _proposalId,
+                governor.state(_proposalId)
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function testFuzz_RevertIf_NonAllowedProposerWithoutWhitelist(
+        address _proposer
+    ) public {
+        vm.assume(!governor.isAllowedProposer(_proposer));
+        vm.assume(!governor.isWhitelisted(_proposer));
+        Proposal memory _proposal = _buildAnEmptyProposal();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorNotWhitelisted.selector,
+                _proposer
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function testFuzz_RevertIf_ExpiredWhitelistedAccountNotInAllowedProposers(
+        address _proposer,
+        uint256 _timeElapsedAfterAccountExpiry
+    ) public {
+        _timeElapsedAfterAccountExpiry = bound(
+            _timeElapsedAfterAccountExpiry,
+            0,
+            type(uint96).max
+        );
+        vm.assume(!governor.isAllowedProposer(_proposer));
+
+        // Add someone to allowed proposers first so they can create temporary whitelist
+        address _allowedProposer = _getRandomProposer();
+        _addToAllowedProposers(_allowedProposer);
+        _setWhitelistedProposerViaAllowedProposer(_proposer);
+
+        vm.warp(
+            governor.whitelistAccountExpirations(_proposer) +
+                _timeElapsedAfterAccountExpiry
+        );
+        Proposal memory _proposal = _buildAnEmptyProposal();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorNotWhitelisted.selector,
+                _proposer
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_TargetsLengthNotOne()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal with multiple targets (should fail)
+        address[] memory _targets = new address[](2);
+        _targets[0] = address(governor);
+        _targets[1] = address(governor);
+
+        uint256[] memory _values = new uint256[](2);
+        _values[0] = 0;
+        _values[1] = 0;
+
+        bytes[] memory _calldatas = new bytes[](2);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+        _calldatas[1] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with multiple targets"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_CalldatasLengthNotOne()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal with multiple calldatas (should fail)
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](2);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+        _calldatas[1] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with multiple calldatas"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_TargetsAddressNotThis()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal targeting different address (should fail)
+        address[] memory _targets = new address[](1);
+        _targets[0] = makeAddr("differentTarget"); // Not address(this)
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with wrong target"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_RevertIf_InvalidProposalWhenGuardianExpired_CalldatasSelectorNotSetProposalGuardian()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create proposal with wrong selector (should fail)
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        // Use a different selector (setWhitelistGuardian instead of setProposalGuardian)
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setWhitelistGuardian.selector,
+            makeAddr("newGuardian")
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Invalid proposal with wrong selector"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.InvalidProposalWhenGuardianExpired.selector
+            )
+        );
+        _submitProposal(_proposer, _proposal);
+    }
+
+    function test_ValidProposalWhenGuardianExpired_SetProposalGuardianOnly()
+        public
+    {
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Create valid setProposalGuardian proposal (should succeed)
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            proposalGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Valid setProposalGuardian proposal"
+        );
+
+        // Should not revert
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Verify proposal was created successfully
+        assertTrue(_proposalId > 0);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Active)
+        );
+    }
+}
+
+abstract contract Queue is CompoundGovernorTest {
+    function _queueWithProposalDetailsOrId(
+        Proposal memory _proposal,
+        uint256 _proposalId
+    ) internal virtual;
+
+    function testFuzz_QueuesAnEmptyProposal(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitAndPassProposal(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Queued)
+        );
+    }
+
+    function testFuzz_EmitsProposalQueuedEvent(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitAndPassProposal(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        vm.expectEmit();
+        emit IGovernor.ProposalQueued(
+            _proposalId,
+            block.timestamp + timelock.delay()
+        );
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsPending(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposalWithoutRoll(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Pending,
+                _encodeStateBitmap(IGovernor.ProposalState.Succeeded)
+            )
+        );
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsActive(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_getRandomProposer(), _proposal);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Active,
+                _encodeStateBitmap(IGovernor.ProposalState.Succeeded)
+            )
+        );
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsDefeated(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitAndFailProposal(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Defeated,
+                _encodeStateBitmap(IGovernor.ProposalState.Succeeded)
+            )
+        );
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsAlreadyQueued(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassAndQueueProposal(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Queued,
+                _encodeStateBitmap(IGovernor.ProposalState.Succeeded)
+            )
+        );
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsExecuted(address _actor) public {
+        vm.assume(_actor != address(0));
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        _addToAllowedProposers(_actor);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassQueueAndExecuteProposal(
+            _actor,
+            _proposal
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Executed,
+                _encodeStateBitmap(IGovernor.ProposalState.Succeeded)
+            )
+        );
+        vm.prank(_actor);
+        _queueWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+}
+
+contract QueueWithProposalId is Queue {
+    function _queueWithProposalDetailsOrId(
+        Proposal memory,
+        /* _proposal */
+        uint256 _proposalId
+    ) internal override {
+        governor.queue(_proposalId);
+    }
+}
+
+contract QueueWithProposalDetails is Queue {
+    function _queueWithProposalDetailsOrId(
+        Proposal memory _proposal,
+        uint256 /* _proposalId */
+    ) internal override {
+        governor.queue(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            keccak256(bytes(_proposal.description))
+        );
+    }
+}
+
+abstract contract Execute is CompoundGovernorTest {
+    function _executeWithProposalDetailsOrId(
+        Proposal memory _proposal,
+        uint256 _proposalId
+    ) internal virtual;
+
+    function testFuzz_ExecutesAProposal(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassAndQueueProposal(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        vm.prank(_actor);
+        _executeWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Executed)
+        );
+    }
+
+    function testFuzz_EmitsProposalExecutedEvent(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassAndQueueProposal(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        vm.expectEmit();
+        emit IGovernor.ProposalExecuted(_proposalId);
+        vm.prank(_actor);
+        _executeWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsPending(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposalWithoutRoll(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        bytes32 _expectedBitMap = _encodeStateBitmap(
+            IGovernor.ProposalState.Queued
+        ) | _encodeStateBitmap(IGovernor.ProposalState.Succeeded);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Pending,
+                _expectedBitMap
+            )
+        );
+        vm.prank(_actor);
+        _executeWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsActive(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_getRandomProposer(), _proposal);
+
+        bytes32 _expectedBitMap = _encodeStateBitmap(
+            IGovernor.ProposalState.Queued
+        ) | _encodeStateBitmap(IGovernor.ProposalState.Succeeded);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Active,
+                _expectedBitMap
+            )
+        );
+        vm.prank(_actor);
+        _executeWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsDefeated(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitAndFailProposal(
+            _getRandomProposer(),
+            _proposal
+        );
+
+        bytes32 _expectedBitMap = _encodeStateBitmap(
+            IGovernor.ProposalState.Queued
+        ) | _encodeStateBitmap(IGovernor.ProposalState.Succeeded);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Defeated,
+                _expectedBitMap
+            )
+        );
+        vm.prank(_actor);
+        _executeWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function testFuzz_RevertIf_ProposalIsExecuted(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        _addToAllowedProposers(_actor);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassQueueAndExecuteProposal(
+            _actor,
+            _proposal
+        );
+
+        bytes32 _expectedBitMap = _encodeStateBitmap(
+            IGovernor.ProposalState.Queued
+        ) | _encodeStateBitmap(IGovernor.ProposalState.Succeeded);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Executed,
+                _expectedBitMap
+            )
+        );
+        vm.prank(_actor);
+        _executeWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+}
+
+contract ExecuteWithProposalDetails is Execute {
+    function _executeWithProposalDetailsOrId(
+        Proposal memory _proposal,
+        uint256 /* _proposalId */
+    ) internal override {
+        governor.execute(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            keccak256(bytes(_proposal.description))
+        );
+    }
+}
+
+contract ExecuteWithProposalId is Execute {
+    function _executeWithProposalDetailsOrId(
+        Proposal memory,
+        /* _proposal */
+        uint256 _proposalId
+    ) internal override {
+        governor.execute(_proposalId);
+    }
+}
+
+abstract contract Cancel is CompoundGovernorTest {
+    bytes32 private constant ALL_PROPOSAL_STATES_BITMAP =
+        bytes32((2 ** (uint8(type(IGovernor.ProposalState).max) + 1)) - 1);
+
+    function _cancelWithProposalDetailsOrId(
+        Proposal memory _proposal,
+        uint256 _proposalId
+    ) internal virtual;
+
+    function _removeDelegateeVotingWeight(address _proposer) private {
+        vm.mockCall(
+            address(token),
+            abi.encodeWithSelector(
+                token.getPriorVotes.selector,
+                _proposer,
+                block.number - 1
+            ),
+            abi.encode(0) // Return 0 as the new voting weight
+        );
+    }
+
+    function test_AllowedProposerCanCancelItsOwnProposal() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_RemovedAllowedProposerCanStillCancelItsOwnProposal() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Add more proposers so we can remove one
+        for (uint256 i = 0; i < 6; i++) {
+            _addToAllowedProposers(
+                makeAddr(string(abi.encodePacked("proposer", i)))
+            );
+        }
+
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Remove proposer from allowed list
+        _removeFromAllowedProposers(_proposer);
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_ProposerCanCancelItsOwnProposal() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function testFuzz_RevertIf_ProposalIsExecuted(address _actor) public {
+        vm.assume(_actor != PROXY_ADMIN_ADDRESS);
+        _addToAllowedProposers(_actor);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassQueueAndExecuteProposal(
+            _actor,
+            _proposal
+        );
+
+        bytes32 _expectedBitMap = ALL_PROPOSAL_STATES_BITMAP ^
+            _encodeStateBitmap(IGovernor.ProposalState.Canceled) ^
+            _encodeStateBitmap(IGovernor.ProposalState.Expired) ^
+            _encodeStateBitmap(IGovernor.ProposalState.Executed);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorUnexpectedProposalState.selector,
+                _proposalId,
+                IGovernor.ProposalState.Executed,
+                _expectedBitMap
+            )
+        );
+        vm.prank(proposalGuardian.account);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function test_AllowedProposerCanCancelProposalInActiveState() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Verify proposal is in Active state
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Active)
+        );
+
+        assertTrue(governor.isAllowedProposer(_proposer));
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_AllowedProposerCanCancelProposalInPendingState() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposalWithoutRoll(_proposer, _proposal);
+
+        // Verify proposal is in Pending state
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Pending)
+        );
+
+        assertTrue(governor.isAllowedProposer(_proposer));
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_AllowedProposerCanCancelProposalInSucceededState() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitAndPassProposal(_proposer, _proposal);
+
+        // Verify proposal is in Succeeded state
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Succeeded)
+        );
+
+        assertTrue(governor.isAllowedProposer(_proposer));
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_AllowedProposerCanCancelProposalInQueuedState() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitPassAndQueueProposal(_proposer, _proposal);
+
+        // Verify proposal is in Queued state
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Queued)
+        );
+
+        assertTrue(governor.isAllowedProposer(_proposer));
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_RemovedAllowedProposerCanCancelInDifferentStates() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+
+        // Add more proposers so we can remove one
+        for (uint256 i = 0; i < 6; i++) {
+            _addToAllowedProposers(
+                makeAddr(string(abi.encodePacked("proposer", i)))
+            );
+        }
+
+        // Test cancellation in Active state
+        Proposal memory _proposal1 = _buildAnEmptyProposal();
+        _proposal1.description = "Test proposal 1";
+        uint256 _proposalId1 = _submitProposal(_proposer, _proposal1);
+
+        // Remove proposer from allowed list
+        _removeFromAllowedProposers(_proposer);
+
+        assertFalse(governor.isAllowedProposer(_proposer));
+
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal1, _proposalId1);
+        vm.assertEq(
+            uint256(governor.state(_proposalId1)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_ProposerCanCancelTheirOwnProposal() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Proposer should be able to cancel their own proposal
+        vm.prank(_proposer);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_ProposalGuardianCanCancelAnyProposalIfNotExpired() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Ensure proposal guardian is not expired
+        assertTrue(block.timestamp <= proposalGuardian.expiration);
+
+        // Proposal guardian should be able to cancel any proposal
+        vm.prank(proposalGuardian.account);
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+        vm.assertEq(
+            uint256(governor.state(_proposalId)),
+            uint256(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function test_ExpiredProposalGuardianCannotCancelProposal() public {
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+        assertTrue(block.timestamp > proposalGuardian.expiration);
+
+        // Expired proposal guardian should not be able to cancel
+        vm.prank(proposalGuardian.account);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.OnlyProposerOrProposalGuardian.selector
+            )
+        );
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+
+    function test_UnauthorizedUserCannotCancelProposal() public {
+        address _proposer = _getRandomProposer();
+        address _unauthorizedUser = makeAddr("unauthorized");
+        _addToAllowedProposers(_proposer);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+
+        // Ensure unauthorized user is not the proposer or proposal guardian
+        vm.assume(_unauthorizedUser != _proposer);
+        vm.assume(_unauthorizedUser != proposalGuardian.account);
+
+        // Unauthorized user should not be able to cancel
+        vm.prank(_unauthorizedUser);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.OnlyProposerOrProposalGuardian.selector
+            )
+        );
+        _cancelWithProposalDetailsOrId(_proposal, _proposalId);
+    }
+}
+
+contract CancelWithProposalDetails is Cancel {
+    function _cancelWithProposalDetailsOrId(
+        Proposal memory _proposal,
+        uint256 /* _proposalId */
+    ) internal override {
+        governor.cancel(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            keccak256(bytes(_proposal.description))
+        );
+    }
+}
+
+contract CancelWithProposalId is Cancel {
+    function _cancelWithProposalDetailsOrId(
+        Proposal memory,
+        /* _proposal */
+        uint256 _proposalId
+    ) internal override {
+        governor.cancel(_proposalId);
+    }
+}
+
+contract IsWhitelisted is CompoundGovernorTest {
+    function testFuzz_ReturnTrueIfAnAccountIsStillWithinExpiry(
+        address _account,
+        uint256 _expiration,
+        uint256 _timeBeforeExpiry,
+        uint256 _randomSeed
+    ) public {
+        _expiration = bound(_expiration, 1, type(uint256).max);
+        _timeBeforeExpiry = bound(_timeBeforeExpiry, 0, _expiration - 1);
+
+        vm.prank(_timelockOrWhitelistGuardian(_randomSeed));
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+
+        vm.warp(_timeBeforeExpiry);
+        vm.assertEq(governor.isWhitelisted(_account), true);
+    }
+
+    function testFuzz_ReturnFalseIfAnAccountIsExpired(
+        address _account,
+        uint256 _expiration,
+        uint256 _timeAfterExpiry,
+        uint256 _randomSeed
+    ) public {
+        _expiration = bound(_expiration, 1, type(uint256).max - 1);
+        _timeAfterExpiry = bound(
+            _timeAfterExpiry,
+            _expiration,
+            type(uint256).max
+        );
+
+        vm.prank(_timelockOrWhitelistGuardian(_randomSeed));
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+
+        vm.warp(_timeAfterExpiry);
+        vm.assertEq(governor.isWhitelisted(_account), false);
+    }
+
+    function testFuzz_ReturnFalseIfAnAccountIsNotWhitelisted(
+        address _account
+    ) public view {
+        vm.assertEq(governor.isWhitelisted(_account), false);
+    }
+}
+
+contract SetProposalGuardian is CompoundGovernorTest {
+    function _buildSetProposalGuardianProposal(
+        CompoundGovernor.ProposalGuardian memory _proposalGuardian
+    ) private view returns (Proposal memory _proposal) {
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            _proposalGuardian
+        );
+
+        _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Set New proposalGuardian"
+        );
+    }
+
+    function testFuzz_SetsProposalGuardianAsTimelock(
+        CompoundGovernor.ProposalGuardian memory _proposalGuardian
+    ) public {
+        // Use the proposal guardian as the proposer since it's already in allowed proposers
+        address _proposer = proposalGuardian.account;
+
+        Proposal memory _proposal = _buildSetProposalGuardianProposal(
+            _proposalGuardian
+        );
+        _submitPassQueueAndExecuteProposal(_proposer, _proposal);
+        (address _account, uint96 _expiration) = governor.proposalGuardian();
+        assertEq(_account, _proposalGuardian.account);
+        assertEq(_expiration, _proposalGuardian.expiration);
+    }
+
+    function testFuzz_EmitsEventWhenAProposalGuardianIsSetByTheTimelock(
+        CompoundGovernor.ProposalGuardian memory _proposalGuardian,
+        address _caller
+    ) public {
+        vm.assume(_caller != PROXY_ADMIN_ADDRESS);
+        (address _currentAccount, uint96 _currentExpiration) = governor
+            .proposalGuardian();
+
+        // Use the proposal guardian as the proposer since it's already in allowed proposers
+        address _proposer = proposalGuardian.account;
+
+        Proposal memory _proposal = _buildSetProposalGuardianProposal(
+            _proposalGuardian
+        );
+        _submitPassAndQueueProposal(_proposer, _proposal);
+
+        vm.expectEmit();
+        emit CompoundGovernor.ProposalGuardianSet(
+            _currentAccount,
+            _currentExpiration,
+            _proposalGuardian.account,
+            _proposalGuardian.expiration
+        );
+
+        vm.prank(_caller);
+        governor.execute(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            keccak256(bytes(_proposal.description))
+        );
+    }
+
+    function testFuzz_RevertIf_CallerIsNotTimelock(
+        CompoundGovernor.ProposalGuardian memory _proposalGuardian,
+        address _caller
+    ) public {
+        vm.assume(
+            _caller != TIMELOCK_ADDRESS && _caller != PROXY_ADMIN_ADDRESS
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorOnlyExecutor.selector,
+                _caller
+            )
+        );
+        vm.prank(_caller);
+        governor.setProposalGuardian(_proposalGuardian);
+    }
+
+    function test_PreviousGuardianIsRemovedFromAllowedProposers() public {
+        // The current proposal guardian is already in allowed proposers from initialization
+        address currentGuardian = proposalGuardian.account;
+
+        // Verify current guardian is in allowed proposers
+        assertTrue(governor.isAllowedProposer(currentGuardian));
+
+        // Create new proposal guardian
+        CompoundGovernor.ProposalGuardian memory newGuardian = CompoundGovernor
+            .ProposalGuardian({
+                account: makeAddr("newGuardian"),
+                expiration: uint96(block.timestamp + 1000)
+            });
+
+        Proposal memory _proposal = _buildSetProposalGuardianProposal(
+            newGuardian
+        );
+        _submitPassQueueAndExecuteProposal(proposalGuardian.account, _proposal);
+
+        // Verify previous guardian is removed from allowed proposers
+        assertFalse(governor.isAllowedProposer(currentGuardian));
+        // Verify new guardian is added to allowed proposers
+        assertTrue(governor.isAllowedProposer(newGuardian.account));
+    }
+
+    function test_NewGuardianIsAddedToAllowedProposers() public {
+        // Create new proposal guardian
+        CompoundGovernor.ProposalGuardian memory newGuardian = CompoundGovernor
+            .ProposalGuardian({
+                account: makeAddr("newGuardian"),
+                expiration: uint96(block.timestamp + 1000)
+            });
+
+        // Verify new guardian is not in allowed proposers initially
+        assertFalse(governor.isAllowedProposer(newGuardian.account));
+        assertTrue(governor.isAllowedProposer(proposalGuardian.account));
+
+        Proposal memory _proposal = _buildSetProposalGuardianProposal(
+            newGuardian
+        );
+        _submitPassQueueAndExecuteProposal(proposalGuardian.account, _proposal);
+
+        // Verify new guardian is added to allowed proposers
+        assertTrue(governor.isAllowedProposer(newGuardian.account));
+    }
+
+    function testFork_CurrentGuardianIsNotInAllowedProposersList() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor currentGovernor,
+
+        ) = _setupUpgradeTest();
+
+        governor = currentGovernor;
+
+        // Create new proposal guardian that is not in allowed proposers
+        CompoundGovernor.ProposalGuardian memory newGuardian = CompoundGovernor
+            .ProposalGuardian({
+                account: makeAddr("newGuardian"),
+                expiration: uint96(block.timestamp + 1000)
+            });
+
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            ""
+        );
+
+        // Verify new guardian is not in allowed proposers initially and the current guardian is not in allowed
+        // proposers
+        assertFalse(governor.isAllowedProposer(newGuardian.account));
+        assertFalse(governor.isAllowedProposer(proposalGuardian.account));
+
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setProposalGuardian.selector,
+            newGuardian
+        );
+
+        Proposal memory _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Set New proposalGuardian"
+        );
+
+        address _proposer = _getRandomProposer();
+        _addToAllowedProposers(_proposer);
+        vm.prank(_proposer);
+        uint256 _proposalId = governor.propose(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            _proposal.description
+        );
+
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_DELAY + 1);
+
+        uint256 _timeLockDelay = timelock.delay();
+        for (uint256 _index = 0; _index < _majorDelegates.length; _index++) {
+            vm.prank(_majorDelegates[_index]);
+            governor.castVote(
+                _proposalId,
+                uint8(GovernorCountingSimpleUpgradeable.VoteType.For)
+            );
+        }
+
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
+        governor.queue(_proposalId);
+
+        vm.warp(block.timestamp + _timeLockDelay + 1);
+        governor.execute(_proposalId);
+
+        // Verify new guardian is now in allowed proposers
+        assertTrue(governor.isAllowedProposer(newGuardian.account));
+        assertFalse(governor.isAllowedProposer(proposalGuardian.account));
+    }
+}
+
+import { GovernorCountingSimpleUpgradeable } from "@openzeppelin/contracts-upgradeable/governance/extensions/GovernorCountingSimpleUpgradeable.sol";
+
+contract SetWhitelistAccountExpiration is CompoundGovernorTest {
+    function test_AllowedProposerCanWhitelistAccount() public {
+        address _allowedProposer = _getRandomProposer();
+        address _account = makeAddr("account");
+        uint256 _expiration = block.timestamp + 1000;
+
+        _addToAllowedProposers(_allowedProposer);
+
+        vm.prank(_allowedProposer);
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+        assertEq(governor.whitelistAccountExpirations(_account), _expiration);
+    }
+
+    function test_AllowedProposerCanReduceTemporaryProposerLifetime() public {
+        address _allowedProposer = _getRandomProposer();
+        address _account = makeAddr("account");
+        uint256 _initialExpiration = block.timestamp + 1000;
+        uint256 _reducedExpiration = 0;
+
+        _addToAllowedProposers(_allowedProposer);
+
+        vm.prank(_allowedProposer);
+        governor.setWhitelistAccountExpiration(_account, _initialExpiration);
+
+        vm.prank(_allowedProposer);
+        governor.setWhitelistAccountExpiration(_account, _reducedExpiration);
+        assertEq(
+            governor.whitelistAccountExpirations(_account),
+            _reducedExpiration
+        );
+    }
+
+    function test_EmitsEventWhenAnAccountIsWhitelisted() public {
+        address _allowedProposer = _getRandomProposer();
+        address _account = makeAddr("account");
+        uint256 _expiration = block.timestamp + 1000;
+
+        _addToAllowedProposers(_allowedProposer);
+
+        vm.prank(_allowedProposer);
+        vm.expectEmit();
+        emit CompoundGovernor.WhitelistAccountExpirationSet(
+            _allowedProposer,
+            _account,
+            _expiration
+        );
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+    }
+
+    function test_RevertIf_CallerIsNotAllowedProposer() public {
+        address _caller = makeAddr("caller");
+        address _account = makeAddr("account");
+        uint256 _expiration = block.timestamp + 1000;
+
+        vm.prank(_caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.OnlyAllowedProposers.selector
+            )
+        );
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+    }
+
+    function test_RevertIf_AccountIsZeroAddress() public {
+        address _allowedProposer = _getRandomProposer();
+        address _account = address(0);
+        uint256 _expiration = block.timestamp + 1000;
+
+        _addToAllowedProposers(_allowedProposer);
+
+        vm.prank(_allowedProposer);
+        vm.expectRevert(
+            abi.encodeWithSelector(CompoundGovernor.ZeroAddress.selector)
+        );
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+    }
+
+    function test_RevertIf_AccountIsInAllowedProposers() public {
+        address _allowedProposer = _getRandomProposer();
+        address _account = makeAddr("account");
+        uint256 _expiration = block.timestamp + 1000;
+
+        _addToAllowedProposers(_allowedProposer);
+        _addToAllowedProposers(_account);
+
+        vm.prank(_allowedProposer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.AlreadySet.selector,
+                _account
+            )
+        );
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+    }
+
+    function test_RevertIf_AccountIsProposalGuardian() public {
+        address _allowedProposer = _getRandomProposer();
+        address _account = proposalGuardian.account;
+        uint256 _expiration = block.timestamp + 1000;
+
+        _addToAllowedProposers(_allowedProposer);
+
+        vm.prank(_allowedProposer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.IsProposalGuardian.selector,
+                _account
+            )
+        );
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+    }
+
+    function test_RevertIf_ExpirationExceedsMaxLifetime() public {
+        address _allowedProposer = _getRandomProposer();
+        address _account = makeAddr("account");
+
+        _addToAllowedProposers(_allowedProposer);
+
+        // Calculate expiration right before the call to ensure it's based on current time
+        uint256 _expiration = block.timestamp +
+            governor.MAX_TEMPORARY_PROPOSER_LIFETIME() +
+            1;
+
+        vm.prank(_allowedProposer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.ExceedsMaxLifetime.selector,
+                _account
+            )
+        );
+        governor.setWhitelistAccountExpiration(_account, _expiration);
+    }
+}
+
+contract CompoundGovernorSetWhitelistGuardianTest is CompoundGovernorTest {
+    function _buildSetWhitelistGuardianProposal(
+        address _whitelistGuardian
+    ) private view returns (Proposal memory _proposal) {
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(governor);
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            CompoundGovernor.setWhitelistGuardian.selector,
+            _whitelistGuardian
+        );
+
+        _proposal = Proposal(
+            _targets,
+            _values,
+            _calldatas,
+            "Set New whitelistGuardian"
+        );
+    }
+
+    function testFuzz_SetsWhitelistGuardianAsTimelock(
+        address _whitelistGuardian
+    ) public {
+        Proposal memory _proposal = _buildSetWhitelistGuardianProposal(
+            _whitelistGuardian
+        );
+        _submitPassQueueAndExecuteProposal(_getRandomProposer(), _proposal);
+        assertEq(governor.whitelistGuardian(), _whitelistGuardian);
+    }
+
+    function testFuzz_EmitsEventWhenAWhitelistGuardianIsSet(
+        address _whitelistGuardian,
+        address _caller
+    ) public {
+        vm.assume(_caller != PROXY_ADMIN_ADDRESS);
+        Proposal memory _proposal = _buildSetWhitelistGuardianProposal(
+            _whitelistGuardian
+        );
+        _submitPassAndQueueProposal(_getRandomProposer(), _proposal);
+
+        vm.expectEmit();
+        emit CompoundGovernor.WhitelistGuardianSet(
+            governor.whitelistGuardian(),
+            _whitelistGuardian
+        );
+
+        vm.prank(_caller);
+        governor.execute(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            keccak256(bytes(_proposal.description))
+        );
+    }
+
+    function testFuzz_RevertIf_CallerIsNotTimelock(
+        address _whitelistGuardian,
+        address _caller
+    ) public {
+        vm.assume(
+            _caller != TIMELOCK_ADDRESS && _caller != PROXY_ADMIN_ADDRESS
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorOnlyExecutor.selector,
+                _caller
+            )
+        );
+        vm.prank(_caller);
+        governor.setWhitelistGuardian(_whitelistGuardian);
+    }
+}
+
+import { console } from "forge-std/console.sol";
+import { ICompoundTimelock } from "lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/vendor/compound/ICompoundTimelock.sol";
+import { CompoundGovernorConstants } from "script/CompoundGovernorConstants.sol";
+import { ITransparentUpgradeableProxy } from "lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import { Initializable } from "lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
+
+contract BatchWhitelist is CompoundGovernorTest {
+    /**
+     * Note We do tests for this function in fork mode
+     * because we need to test the function with the proposal guardian being in the allowed proposers list due to setup
+     * logic
+     */
+    function testFork_BatchWhitelistAddsProposersCorrectly() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        address[] memory _proposers = new address[](5);
+        _proposers[0] = proposalGuardian.account; // First must be proposal guardian
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+        _proposers[4] = makeAddr("proposer4");
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+
+        address[] memory _allowedProposers = governor.getAllowedProposers();
+        assertEq(_allowedProposers.length, _proposers.length);
+        assertEq(_allowedProposers[0], proposalGuardian.account);
+        assertEq(_allowedProposers[1], _proposers[1]);
+        assertEq(_allowedProposers[2], _proposers[2]);
+        assertEq(_allowedProposers[3], _proposers[3]);
+        assertEq(_allowedProposers[4], _proposers[4]);
+    }
+
+    function testFork_RevertIf_BatchWhitelistContainsZeroAddress() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        address[] memory _proposers = new address[](5);
+        _proposers[0] = proposalGuardian.account; // First must be proposal guardian
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+        _proposers[4] = address(0);
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.ZeroAddressAtIndex.selector,
+                _proposers.length - 1
+            )
+        );
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+    }
+
+    function testFork_RevertIf_BatchWhitelistContainsDuplicates() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        address[] memory _proposers = new address[](5);
+        _proposers[0] = proposalGuardian.account; // First must be proposal guardian
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+        _proposers[4] = makeAddr("proposer1"); // Duplicate
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.DuplicateAddress.selector,
+                _proposers[1]
+            )
+        );
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+    }
+
+    function testFork_RevertIf_ProposalGuardianIsNotFirst() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        address[] memory _proposers = new address[](5);
+        _proposers[0] = makeAddr("proposer0"); // First is not the proposal guardian
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+        _proposers[4] = makeAddr("proposer4");
+
+        assertFalse(proposalGuardian.account == _proposers[0]);
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.FirstMustBeProposalGuardian.selector,
+                _proposers[0]
+            )
+        );
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+    }
+
+    function testFork_RevertIf_DoubleReinitialization() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        address[] memory _proposers = new address[](5);
+        _proposers[0] = proposalGuardian.account; // First must be proposal guardian
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+        _proposers[4] = makeAddr("proposer4");
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+    }
+
+    function test_EmitsEventWhenProposersAdded() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        address[] memory _proposers = new address[](5);
+        _proposers[0] = proposalGuardian.account; // First must be proposal guardian
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+        _proposers[4] = makeAddr("proposer4");
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.expectEmit();
+        emit CompoundGovernor.ProposerAdded(proposalGuardian.account);
+        emit CompoundGovernor.ProposerAdded(_proposers[1]);
+        emit CompoundGovernor.ProposerAdded(_proposers[2]);
+        emit CompoundGovernor.ProposerAdded(_proposers[3]);
+        emit CompoundGovernor.ProposerAdded(_proposers[4]);
+
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+    }
+
+    function test_RevertIf_CallerIsNotProxyAdmin() public {
+        address[] memory _proposers = new address[](1);
+        _proposers[0] = proposalGuardian.account;
+
+        vm.prank(makeAddr("caller"));
+        vm.expectRevert(
+            abi.encodeWithSelector(CompoundGovernor.OnlyProxyAdmin.selector)
+        );
+        governor.batchWhitelist(_proposers);
+    }
+
+    function test_RevertIf_ProposersLengthIsLessThanMinProposers() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        address[] memory _proposers = new address[](4);
+        _proposers[0] = proposalGuardian.account; // First must be proposal guardian
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+
+        assertTrue(_proposers.length < newGovernor.MIN_PROPOSERS());
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.BelowMinimumProposers.selector
+            )
+        );
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+    }
+}
+
+contract AllowedProposers is CompoundGovernorTest {
+    function test_AddressCanBeAddedToListByProposalFlow() public {
+        address _newProposer = makeAddr("newProposer");
+
+        _addToAllowedProposers(_newProposer);
+
+        assertTrue(governor.isAllowedProposer(_newProposer));
+    }
+
+    function test_AddressCanBeRemovedFromListByProposalFlow() public {
+        address _proposer = makeAddr("proposer");
+
+        // Add enough proposers so we can remove one
+        for (uint256 i = 0; i < governor.MIN_PROPOSERS() + 1; i++) {
+            _addToAllowedProposers(
+                makeAddr(string(abi.encodePacked("proposer", i)))
+            );
+        }
+        _addToAllowedProposers(_proposer);
+
+        assertTrue(governor.isAllowedProposer(_proposer));
+
+        _removeFromAllowedProposers(_proposer);
+
+        assertFalse(governor.isAllowedProposer(_proposer));
+    }
+
+    function test_EmitsEventWhenAddressIsAdded() public {
+        address _newProposer = makeAddr("newProposer");
+
+        // Ensure we have at least one allowed proposer to submit the proposal
+        address _allowedProposer = _getRandomProposer();
+        // Make sure they are different addresses
+        vm.assume(_allowedProposer != _newProposer);
+        _addToAllowedProposers(_allowedProposer);
+
+        Proposal memory _proposal = _buildAddProposerProposal(_newProposer);
+        _submitPassAndQueueProposal(_allowedProposer, _proposal);
+
+        vm.expectEmit();
+        emit CompoundGovernor.ProposerAdded(_newProposer);
+        governor.execute(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            keccak256(bytes(_proposal.description))
+        );
+    }
+
+    function test_EmitsEventWhenAddressIsRemoved() public {
+        address _proposer = makeAddr("proposer");
+
+        // Add enough proposers so we can remove one
+        for (uint256 i = 0; i < governor.MIN_PROPOSERS() + 1; i++) {
+            _addToAllowedProposers(
+                makeAddr(string(abi.encodePacked("proposer", i)))
+            );
+        }
+        _addToAllowedProposers(_proposer);
+
+        // Use one of the allowed proposers to submit the proposal
+        address[] memory _allowedProposers = governor.getAllowedProposers();
+        address _submitter = _allowedProposers[0];
+
+        Proposal memory _proposal = _buildRemoveProposerProposal(_proposer);
+        _submitPassAndQueueProposal(_submitter, _proposal);
+
+        vm.expectEmit();
+        emit CompoundGovernor.ProposerRemoved(_proposer);
+        governor.execute(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            keccak256(bytes(_proposal.description))
+        );
+    }
+
+    function test_LengthOfAllowedProposersIsUpdated() public {
+        address _newProposer = makeAddr("newProposer");
+        uint256 _initialLength = governor.getAllowedProposers().length;
+
+        assert(_initialLength == 1); // proposal guardian is added to the list during setup
+
+        // Bootstrap: directly add a major delegate through timelock
+        vm.prank(TIMELOCK_ADDRESS);
+        governor.addProposer(_newProposer);
+
+        uint256 _expectedLength = _initialLength + 1;
+        assertEq(governor.getAllowedProposers().length, _expectedLength);
+    }
+
+    function test_RevertIf_AlreadyAddedAddressCannotBeAdded() public {
+        address _newProposer = makeAddr("newProposer");
+
+        // Add both proposers to allowed list
+        vm.startBroadcast(TIMELOCK_ADDRESS);
+        governor.addProposer(_newProposer);
+
+        // Expect revert when trying to add the same address again
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.AlreadySet.selector,
+                _newProposer
+            )
+        );
+        governor.addProposer(_newProposer);
+        vm.stopBroadcast();
+    }
+
+    function test_RevertIf_ProposalGuardianCannotBeAdded() public {
+        (address proposalGuardian, ) = governor.proposalGuardian();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.IsProposalGuardian.selector,
+                proposalGuardian
+            )
+        );
+
+        vm.prank(TIMELOCK_ADDRESS);
+        governor.addProposer(proposalGuardian);
+    }
+
+    function testFork_RevertIf_LengthCannotBeLessThanMinProposers() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+
+        ) = _setupUpgradeTest();
+
+        (address proposalGuardian, ) = governor.proposalGuardian();
+
+        // First batch whitelist the proposal guardian
+        address[] memory _proposers = new address[](5);
+        _proposers[0] = proposalGuardian;
+        _proposers[1] = makeAddr("proposer1");
+        _proposers[2] = makeAddr("proposer2");
+        _proposers[3] = makeAddr("proposer3");
+        _proposers[4] = makeAddr("proposer4");
+
+        assertEq(_proposers.length, newGovernor.MIN_PROPOSERS());
+
+        bytes memory initData = _getInitDataForBatchWhitelist(_proposers);
+
+        vm.prank(TIMELOCK_ADDRESS);
+        ProxyAdmin(payable(PROXY_ADMIN_ADDRESS)).upgradeAndCall(
+            ITransparentUpgradeableProxy(payable(GOVERNOR_PROXY_ADDRESS)),
+            address(newGovernor),
+            initData
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.BelowMinimumProposers.selector
+            )
+        );
+        vm.prank(TIMELOCK_ADDRESS);
+        governor.removeProposer(_proposers[1]);
+    }
+
+    function test_RevertIf_RemovalOfProposalGuardianIsImpossible() public {
+        address _proposalGuardian = proposalGuardian.account;
+
+        // We expect that the proposal guardian is already in the allowed proposers list
+        assertTrue(governor.isAllowedProposer(_proposalGuardian));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.IsProposalGuardian.selector,
+                _proposalGuardian
+            )
+        );
+
+        vm.prank(TIMELOCK_ADDRESS);
+        governor.removeProposer(_proposalGuardian);
+    }
+
+    function test_RevertIf_ZeroAddressForAdd() public {
+        vm.prank(TIMELOCK_ADDRESS);
+        vm.expectRevert(
+            abi.encodeWithSelector(CompoundGovernor.ZeroAddress.selector)
+        );
+        governor.addProposer(address(0));
+    }
+
+    function test_RevertIf_ZeroAddressForRemove() public {
+        vm.prank(TIMELOCK_ADDRESS);
+        vm.expectRevert(
+            abi.encodeWithSelector(CompoundGovernor.ZeroAddress.selector)
+        );
+        governor.removeProposer(address(0));
+    }
+
+    function test_ProposalGuardianCanAddProposerWhenBelowMinimum() public {
+        address _newProposer = makeAddr("newProposer");
+
+        // Ensure we have fewer than MIN_PROPOSERS
+        uint256 currentLength = governor.getAllowedProposers().length;
+        assert(currentLength < governor.MIN_PROPOSERS());
+
+        // Proposal guardian should be able to add a proposer
+        vm.prank(proposalGuardian.account);
+        governor.addProposer(_newProposer);
+
+        assertTrue(governor.isAllowedProposer(_newProposer));
+    }
+
+    function test_ProposalGuardianCanAddMultipleProposersWhenBelowMinimum()
+        public
+    {
+        // We expect that during setup, the proposal guardian is added to the allowed proposers list so we start with 1
+        assertEq(governor.getAllowedProposers().length, 1);
+
+        // Add proposers one by one until we reach MIN_PROPOSERS
+        for (uint256 i = 0; i < governor.MIN_PROPOSERS() - 1; i++) {
+            address _newProposer = makeAddr(
+                string(abi.encodePacked("proposer", i))
+            );
+
+            vm.prank(proposalGuardian.account);
+            governor.addProposer(_newProposer);
+
+            assertTrue(governor.isAllowedProposer(_newProposer));
+        }
+
+        // Verify we now have MIN_PROPOSERS
+        assertEq(
+            governor.getAllowedProposers().length,
+            governor.MIN_PROPOSERS()
+        );
+    }
+
+    function test_ExpiredProposalGuardianTriesToAddProposer() public {
+        address _newProposer = makeAddr("newProposer");
+
+        // Warp to after proposal guardian expiration
+        vm.warp(uint256(proposalGuardian.expiration) + 1);
+
+        vm.prank(proposalGuardian.account);
+        governor.addProposer(_newProposer);
+
+        assertTrue(governor.isAllowedProposer(_newProposer));
+    }
+
+    function test_ProposalGuardianEmitsEventWhenAddingProposer() public {
+        address _newProposer = makeAddr("newProposer");
+
+        vm.prank(proposalGuardian.account);
+        vm.expectEmit();
+        emit CompoundGovernor.ProposerAdded(_newProposer);
+        governor.addProposer(_newProposer);
+    }
+
+    function test_RevertIf_ProposalGuardianTriesToAddProposerWhenAboveMinimum()
+        public
+    {
+        uint256 _currentLength = governor.getAllowedProposers().length;
+        assertTrue(_currentLength == 1); // proposal guardian is added to the list during setup
+
+        // First, add enough proposers to reach MIN_PROPOSERS
+        for (uint256 i = _currentLength; i < governor.MIN_PROPOSERS(); i++) {
+            address _newProposer = makeAddr(
+                string(abi.encodePacked("proposer", i))
+            );
+            vm.prank(proposalGuardian.account);
+            governor.addProposer(_newProposer);
+        }
+
+        // Now proposal guardian should not be able to add more
+        address _extraProposer = makeAddr("extraProposer");
+
+        uint256 _newAllowedProposersLength = governor
+            .getAllowedProposers()
+            .length;
+        assertTrue(
+            _newAllowedProposersLength == governor.MIN_PROPOSERS(),
+            "Min proposers not reached"
+        );
+
+        vm.prank(proposalGuardian.account);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CompoundGovernor.MinProposersReached.selector
+            )
+        );
+        governor.addProposer(_extraProposer);
+    }
+
+    function test_RevertIf_NonProposalGuardianTriesToAddProposerWhenBelowMinimum()
+        public
+    {
+        address _caller = makeAddr("caller");
+        address _newProposer = makeAddr("newProposer");
+
+        vm.assume(_caller != proposalGuardian.account);
+        vm.assume(_caller != TIMELOCK_ADDRESS);
+
+        vm.prank(_caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorOnlyExecutor.selector,
+                _caller
+            )
+        );
+        governor.addProposer(_newProposer);
+    }
+}
+
+contract CountingMode is CompoundGovernorTest {
+    function testFuzz_ReturnsCorrectCountingMode() public view {
+        assertEq(
+            governor.COUNTING_MODE(),
+            "support=bravo,fractional&quorum=for&params=fractional"
+        );
+    }
+}
+
+contract HasVoted is CompoundGovernorTest {
+    function testFuzz_ReturnsCorrectVotingStatus(
+        bool _hasVotedBefore,
+        uint256 _voteSeed,
+        uint256 _proposerIndex,
+        uint256 _voterIndex
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+        address _proposer = _majorDelegates[_proposerIndex];
+        address _voter = _majorDelegates[_voterIndex];
+
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        vm.prank(_voter);
+        if (_hasVotedBefore) {
+            governor.castVote(_proposalId, uint8(_voteSeed % 3));
+        }
+
+        assertEq(
+            governor.hasVoted(_proposalId, _voter),
+            _hasVotedBefore ? true : false
+        );
+    }
+
+    function testFuzz_ReturnsFalseIfHasVotedCalledWithInvalidProposalId(
+        uint256 _invalidProposalId,
+        address _voter
+    ) public view {
+        vm.assume(_invalidProposalId != 0);
+        assertFalse(governor.hasVoted(_invalidProposalId, _voter));
+    }
+}
+
+contract UsedVotes is CompoundGovernorTest {
+    function testFuzz_ReturnsCorrectUsedVotes(
+        uint256 _proposerIndex,
+        uint256 _voterIndex,
+        uint256 _forVotes,
+        uint256 _againstVotes,
+        uint256 _abstainVotes
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+
+        address _proposer = _majorDelegates[_proposerIndex];
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        address _delegate = _majorDelegates[_voterIndex];
+        uint256 _votes = governor.getVotes(_delegate, vm.getBlockNumber() - 1);
+        _forVotes = bound(_forVotes, 0, _votes);
+        _againstVotes = bound(_againstVotes, 0, _votes - _forVotes);
+        _abstainVotes = bound(
+            _abstainVotes,
+            0,
+            _votes - _forVotes - _againstVotes
+        );
+
+        vm.prank(_delegate);
+        bytes memory _params = abi.encodePacked(
+            uint128(_againstVotes),
+            uint128(_forVotes),
+            uint128(_abstainVotes)
+        );
+        governor.castVoteWithReasonAndParams(
+            _proposalId,
+            VOTE_TYPE_FRACTIONAL,
+            "MyReason",
+            _params
+        );
+
+        assertEq(
+            governor.usedVotes(_proposalId, _delegate),
+            _forVotes + _againstVotes + _abstainVotes
+        );
+    }
+
+    function testFuzz_ReturnsZeroIfUsedVotesCalledWithInvalidProposalId(
+        uint256 _invalidProposalId,
+        address _voter
+    ) public view {
+        vm.assume(_invalidProposalId != 0);
+        assertEq(governor.usedVotes(_invalidProposalId, _voter), 0);
+    }
+}
+
+contract CastVoteWithReasonAndParams is CompoundGovernorTest {
+    function testFuzz_CastVotesViaFlexibleVoting(
+        uint256 _proposerIndex,
+        uint256 _voterIndex,
+        uint256 _forVotes,
+        uint256 _againstVotes,
+        uint256 _abstainVotes
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+
+        address _proposer = _majorDelegates[_proposerIndex];
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        address _delegate = _majorDelegates[_voterIndex];
+        uint256 _votes = governor.getVotes(_delegate, vm.getBlockNumber() - 1);
+        _forVotes = bound(_forVotes, 0, _votes);
+        _againstVotes = bound(_againstVotes, 0, _votes - _forVotes);
+        _abstainVotes = bound(
+            _abstainVotes,
+            0,
+            _votes - _forVotes - _againstVotes
+        );
+
+        vm.prank(_delegate);
+        bytes memory _params = abi.encodePacked(
+            uint128(_againstVotes),
+            uint128(_forVotes),
+            uint128(_abstainVotes)
+        );
+        governor.castVoteWithReasonAndParams(
+            _proposalId,
+            VOTE_TYPE_FRACTIONAL,
+            "MyReason",
+            _params
+        );
+
+        (
+            uint256 _againstVotesCast,
+            uint256 _forVotesCast,
+            uint256 _abstainVotesCast
+        ) = governor.proposalVotes(_proposalId);
+
+        assertEq(_againstVotesCast, _againstVotes);
+        assertEq(_forVotesCast, _forVotes);
+        assertEq(_abstainVotesCast, _abstainVotes);
+    }
+
+    function testFuzz_RevertIf_CastVotesCalledWithNonExistentProposalId(
+        uint256 _invalidProposalId,
+        uint256 _voterIndex,
+        uint256 _forVotes,
+        uint256 _againstVotes,
+        uint256 _abstainVotes
+    ) public {
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+        address _delegate = _majorDelegates[_voterIndex];
+        uint256 _votes = governor.getVotes(_delegate, vm.getBlockNumber() - 1);
+        _forVotes = bound(_forVotes, 0, _votes);
+        _againstVotes = bound(_againstVotes, 0, _votes - _forVotes);
+        _abstainVotes = bound(
+            _abstainVotes,
+            0,
+            _votes - _forVotes - _againstVotes
+        );
+
+        vm.prank(_delegate);
+        bytes memory _params = abi.encodePacked(
+            uint128(_againstVotes),
+            uint128(_forVotes),
+            uint128(_abstainVotes)
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorNonexistentProposal.selector,
+                _invalidProposalId
+            )
+        );
+        governor.castVoteWithReasonAndParams(
+            _invalidProposalId,
+            VOTE_TYPE_FRACTIONAL,
+            "MyReason",
+            _params
+        );
+    }
+
+    function testFuzz_CastVotesTwiceViaFlexibleVoting(
+        uint256 _proposerIndex,
+        uint256 _voterIndex,
+        uint256 _firstVote,
+        uint256 _secondVote,
+        uint256 _forVotes,
+        uint256 _againstVotes,
+        uint256 _abstainVotes
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+        uint256 _proposalId;
+
+        {
+            address _proposer = _majorDelegates[_proposerIndex];
+            Proposal memory _proposal = _buildAnEmptyProposal();
+            _proposalId = _getProposalId(_proposal);
+            _submitProposal(_proposer, _proposal);
+        }
+
+        address _delegate = _majorDelegates[_voterIndex];
+        uint256 _votes = governor.getVotes(_delegate, vm.getBlockNumber() - 1);
+        _firstVote = bound(_firstVote, 0, _votes - 1);
+        _forVotes = bound(_forVotes, 0, _firstVote);
+        _againstVotes = bound(_againstVotes, 0, _firstVote - _forVotes);
+        _abstainVotes = bound(
+            _abstainVotes,
+            0,
+            _firstVote - _forVotes - _againstVotes
+        );
+
+        {
+            vm.prank(_delegate);
+            bytes memory _params = abi.encodePacked(
+                uint128(_againstVotes),
+                uint128(_forVotes),
+                uint128(_abstainVotes)
+            );
+            governor.castVoteWithReasonAndParams(
+                _proposalId,
+                VOTE_TYPE_FRACTIONAL,
+                "MyReason",
+                _params
+            );
+        }
+
+        // Second Vote
+        _secondVote = bound(_secondVote, 0, _votes - _firstVote);
+        uint256 _forFirstVote = _forVotes;
+        _forVotes = bound(
+            uint256(keccak256(abi.encode(_forVotes))),
+            0,
+            _secondVote
+        );
+        uint256 _againstFirstVote = _againstVotes;
+        _againstVotes = bound(
+            uint256(keccak256(abi.encode(_againstVotes))),
+            0,
+            _secondVote - _forVotes
+        );
+        uint256 _abstainFirstVote = _abstainVotes;
+        _abstainVotes = bound(
+            uint256(keccak256(abi.encode(_abstainVotes))),
+            0,
+            _secondVote - _forVotes - _againstVotes
+        );
+
+        {
+            vm.prank(_delegate);
+            bytes memory _params = abi.encodePacked(
+                uint128(_againstVotes),
+                uint128(_forVotes),
+                uint128(_abstainVotes)
+            );
+            governor.castVoteWithReasonAndParams(
+                _proposalId,
+                VOTE_TYPE_FRACTIONAL,
+                "MyReason",
+                _params
+            );
+        }
+
+        (
+            uint256 _againstVotesCast2,
+            uint256 _forVotesCast2,
+            uint256 _abstainVotesCast2
+        ) = governor.proposalVotes(_proposalId);
+
+        assertEq(_againstVotesCast2, _againstFirstVote + _againstVotes);
+        assertEq(_forVotesCast2, _forFirstVote + _forVotes);
+        assertEq(_abstainVotesCast2, _abstainFirstVote + _abstainVotes);
+    }
+
+    function testFuzz_CastFractionalVotesThenNominalVotesViaFlexibleVoting(
+        uint256 _proposerIndex,
+        uint256 _voterIndex,
+        uint256 _forVotes,
+        uint256 _againstVotes,
+        uint256 _abstainVotes,
+        uint256 _voteSeed
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+
+        address _proposer = _majorDelegates[_proposerIndex];
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        address _delegate = _majorDelegates[_voterIndex];
+        uint256 _votes = governor.getVotes(_delegate, vm.getBlockNumber() - 1);
+        _forVotes = bound(_forVotes, 0, _votes - 1);
+        _againstVotes = bound(_againstVotes, 0, _votes - 1 - _forVotes);
+        _abstainVotes = bound(
+            _abstainVotes,
+            0,
+            _votes - 1 - _forVotes - _againstVotes
+        );
+
+        {
+            vm.prank(_delegate);
+            bytes memory _params = abi.encodePacked(
+                uint128(_againstVotes),
+                uint128(_forVotes),
+                uint128(_abstainVotes)
+            );
+            governor.castVoteWithReasonAndParams(
+                _proposalId,
+                VOTE_TYPE_FRACTIONAL,
+                "MyReason",
+                _params
+            );
+        }
+
+        // Nominal Votes
+        uint8 _support = uint8(_voteSeed % 3);
+        vm.prank(_delegate);
+        governor.castVoteWithReasonAndParams(
+            _proposalId,
+            _support,
+            "MyReason",
+            ""
+        );
+
+        (
+            uint256 _againstVotesCast,
+            uint256 _forVotesCast,
+            uint256 _abstainVotesCast
+        ) = governor.proposalVotes(_proposalId);
+        assertEq(
+            _againstVotesCast,
+            _support == 0 ? _votes - _forVotes - _abstainVotes : _againstVotes
+        );
+        assertEq(
+            _forVotesCast,
+            _support == 1 ? _votes - _againstVotes - _abstainVotes : _forVotes
+        );
+        assertEq(
+            _abstainVotesCast,
+            _support == 2 ? _votes - _againstVotes - _forVotes : _abstainVotes
+        );
+    }
+
+    function testFuzz_ProposalSucceedsAfterFractionalVotes(
+        uint256 _proposerIndex,
+        uint256 _voterIndex
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+
+        address _proposer = _majorDelegates[_proposerIndex];
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        uint256 _totalForVotes;
+        for (uint256 i; i < _majorDelegates.length; i++) {
+            address _delegate = _majorDelegates[i];
+            uint256 _votes = governor.getVotes(
+                _delegate,
+                vm.getBlockNumber() - 1
+            );
+            uint256 _forVotes = _votes;
+            uint256 _againstVotes = 0;
+            uint256 _abstainVotes = 0;
+
+            vm.prank(_delegate);
+            bytes memory _params = abi.encodePacked(
+                uint128(_againstVotes),
+                uint128(_forVotes),
+                uint128(_abstainVotes)
+            );
+            governor.castVoteWithReasonAndParams(
+                _proposalId,
+                VOTE_TYPE_FRACTIONAL,
+                "MyReason",
+                _params
+            );
+            _totalForVotes += _forVotes;
+        }
+
+        (
+            uint256 _againstVotesCast,
+            uint256 _forVotesCast,
+            uint256 _abstainVotesCast
+        ) = governor.proposalVotes(_proposalId);
+        assertEq(_forVotesCast, _totalForVotes);
+        assertEq(_againstVotesCast, 0);
+        assertEq(_abstainVotesCast, 0);
+
+        vm.roll(vm.getBlockNumber() + governor.votingPeriod() + 1);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Succeeded)
+        );
+    }
+
+    function testFuzz_ProposalFailsAfterFractionalVotesToAbstain(
+        uint256 _proposerIndex,
+        uint256 _voterIndex
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+
+        address _proposer = _majorDelegates[_proposerIndex];
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        uint256 _totalAbstainVotes;
+        for (uint256 i; i < _majorDelegates.length; i++) {
+            address _delegate = _majorDelegates[i];
+            uint256 _votes = governor.getVotes(
+                _delegate,
+                vm.getBlockNumber() - 1
+            );
+            uint256 _forVotes = 1;
+            uint256 _againstVotes = 0;
+            uint256 _abstainVotes = _votes - 1;
+
+            vm.prank(_delegate);
+            bytes memory _params = abi.encodePacked(
+                uint128(_againstVotes),
+                uint128(_forVotes),
+                uint128(_abstainVotes)
+            );
+            governor.castVoteWithReasonAndParams(
+                _proposalId,
+                VOTE_TYPE_FRACTIONAL,
+                "MyReason",
+                _params
+            );
+            _totalAbstainVotes += _abstainVotes;
+        }
+
+        (
+            uint256 _againstVotesCast,
+            uint256 _forVotesCast,
+            uint256 _abstainVotesCast
+        ) = governor.proposalVotes(_proposalId);
+        assertEq(_forVotesCast, _majorDelegates.length);
+        assertEq(_againstVotesCast, 0);
+        assertEq(_abstainVotesCast, _totalAbstainVotes);
+
+        vm.roll(vm.getBlockNumber() + governor.votingPeriod() + 1);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Defeated)
+        );
+    }
+
+    function testFuzz_ProposalFailsAfterFractionalVotes(
+        uint256 _proposerIndex,
+        uint256 _voterIndex
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+
+        address _proposer = _majorDelegates[_proposerIndex];
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        uint256 _totalAgainstVotes;
+        for (uint256 i; i < _majorDelegates.length; i++) {
+            address _delegate = _majorDelegates[i];
+            uint256 _votes = governor.getVotes(
+                _delegate,
+                vm.getBlockNumber() - 1
+            );
+            uint256 _forVotes = 0;
+            uint256 _againstVotes = _votes;
+            uint256 _abstainVotes = 0;
+
+            vm.prank(_delegate);
+            bytes memory _params = abi.encodePacked(
+                uint128(_againstVotes),
+                uint128(_forVotes),
+                uint128(_abstainVotes)
+            );
+            governor.castVoteWithReasonAndParams(
+                _proposalId,
+                VOTE_TYPE_FRACTIONAL,
+                "MyReason",
+                _params
+            );
+            _totalAgainstVotes += _againstVotes;
+        }
+
+        (
+            uint256 _againstVotesCast,
+            uint256 _forVotesCast,
+            uint256 _abstainVotesCast
+        ) = governor.proposalVotes(_proposalId);
+        assertEq(_forVotesCast, 0);
+        assertEq(_againstVotesCast, _totalAgainstVotes);
+        assertEq(_abstainVotesCast, 0);
+
+        vm.roll(vm.getBlockNumber() + governor.votingPeriod() + 1);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Defeated)
+        );
+    }
+
+    function testFuzz_RevertIf_VoteWeightGreaterThanTotalWeightViaFlexibleVoting(
+        uint256 _proposerIndex,
+        uint256 _voterIndex,
+        uint256 _forVotes,
+        uint256 _againstVotes,
+        uint256 _abstainVotes,
+        uint256 _sumOfVotes
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+
+        address _proposer = _majorDelegates[_proposerIndex];
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _getProposalId(_proposal);
+        _submitProposal(_proposer, _proposal);
+
+        address _delegate = _majorDelegates[_voterIndex];
+        uint256 _votes = governor.getVotes(_delegate, vm.getBlockNumber() - 1);
+
+        _sumOfVotes = bound(_sumOfVotes, _votes + 1, _votes * 2);
+        _forVotes = bound(_forVotes, 0, _sumOfVotes);
+        _againstVotes = bound(_againstVotes, 0, _sumOfVotes - _forVotes);
+        _abstainVotes = _sumOfVotes - _forVotes - _againstVotes;
+
+        bytes memory _params = abi.encodePacked(
+            uint128(_againstVotes),
+            uint128(_forVotes),
+            uint128(_abstainVotes)
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                GovernorCountingFractionalUpgradeable
+                    .GovernorExceedRemainingWeight
+                    .selector,
+                _delegate,
+                _sumOfVotes,
+                _votes
+            )
+        );
+        vm.prank(_delegate);
+        governor.castVoteWithReasonAndParams(
+            _proposalId,
+            VOTE_TYPE_FRACTIONAL,
+            "MyReason",
+            _params
+        );
+    }
+
+    function testFuzz_RevertIf_VotingWeightGreaterThanTwoVotesViaFlexibleVoting(
+        uint256 _proposerIndex,
+        uint256 _voterIndex,
+        uint256 _firstVote,
+        uint256 _secondVote,
+        uint256 _forVotes,
+        uint256 _againstVotes,
+        uint256 _abstainVotes
+    ) public {
+        _proposerIndex = bound(_proposerIndex, 0, _majorDelegates.length - 1);
+        _voterIndex = bound(_voterIndex, 0, _majorDelegates.length - 1);
+        uint256 _proposalId;
+
+        {
+            address _proposer = _majorDelegates[_proposerIndex];
+            Proposal memory _proposal = _buildAnEmptyProposal();
+            _proposalId = _getProposalId(_proposal);
+            _submitProposal(_proposer, _proposal);
+        }
+
+        address _delegate = _majorDelegates[_voterIndex];
+        uint256 _votes = governor.getVotes(_delegate, vm.getBlockNumber() - 1);
+        _firstVote = bound(_firstVote, 0, _votes - 1);
+        _forVotes = bound(_forVotes, 0, _firstVote);
+        _againstVotes = bound(_againstVotes, 0, _firstVote - _forVotes);
+        _abstainVotes = bound(
+            _abstainVotes,
+            0,
+            _firstVote - _forVotes - _againstVotes
+        );
+
+        {
+            vm.prank(_delegate);
+            bytes memory _params = abi.encodePacked(
+                uint128(_againstVotes),
+                uint128(_forVotes),
+                uint128(_abstainVotes)
+            );
+            governor.castVoteWithReasonAndParams(
+                _proposalId,
+                VOTE_TYPE_FRACTIONAL,
+                "MyReason",
+                _params
+            );
+        }
+
+        // Second Vote
+        uint256 _firstVoteTotal = _forVotes + _againstVotes + _abstainVotes;
+        _secondVote = bound(
+            _secondVote,
+            _votes - _firstVoteTotal + 1,
+            _votes * 2
+        );
+        _forVotes = bound(
+            uint256(keccak256(abi.encode(_forVotes))),
+            0,
+            _secondVote
+        );
+        _againstVotes = bound(
+            uint256(keccak256(abi.encode(_againstVotes))),
+            0,
+            _secondVote - _forVotes
+        );
+        _abstainVotes = _secondVote - _forVotes - _againstVotes;
+
+        bytes memory _newParams = abi.encodePacked(
+            uint128(_againstVotes),
+            uint128(_forVotes),
+            uint128(_abstainVotes)
+        );
+        vm.prank(_delegate);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                GovernorCountingFractionalUpgradeable
+                    .GovernorExceedRemainingWeight
+                    .selector,
+                _delegate,
+                _secondVote,
+                _votes - _firstVoteTotal
+            )
+        );
+        governor.castVoteWithReasonAndParams(
+            _proposalId,
+            VOTE_TYPE_FRACTIONAL,
+            "MyReason",
+            _newParams
+        );
+    }
+}
+
+contract ProposalDeadline is CompoundGovernorTest {
+    function testFuzz_ProposalDeadlineCorrectWithEnumeratedId(uint256) public {
+        address _proposer = _getRandomProposer();
+        uint256 _clockAtSubmit = governor.clock();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        uint256 _deadline = governor.proposalDeadline(_proposalId);
+        assertEq(
+            _deadline,
+            _clockAtSubmit + INITIAL_VOTING_DELAY + INITIAL_VOTING_PERIOD
+        );
+    }
+
+    function testFuzz_ReturnsZeroIfProposalDeadlineCalledWithInvalidProposalId(
+        uint256 _invalidProposalId
+    ) public view {
+        uint256 _deadline = governor.proposalDeadline(_invalidProposalId);
+        assertEq(_deadline, 0);
+    }
+}
+
+contract ProposalSnapshot is CompoundGovernorTest {
+    function testFuzz_ProposalSnapshotCorrectWithEnumeratedId(uint256) public {
+        address _proposer = _getRandomProposer();
+        uint256 _clockAtSubmit = governor.clock();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        uint256 _snapShot = governor.proposalSnapshot(_proposalId);
+        assertEq(_snapShot, _clockAtSubmit + INITIAL_VOTING_DELAY);
+    }
+
+    function testFuzz_ReturnsZeroIfProposalSnapshotCalledWithInvalidProposalId(
+        uint256 _invalidProposalId
+    ) public view {
+        uint256 _snapShot = governor.proposalSnapshot(_invalidProposalId);
+        assertEq(_snapShot, 0);
+    }
+}
+
+contract ProposalEta is CompoundGovernorTest {
+    function testFuzz_ProposalEtaCorrectWithEnumeratedId(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        _passProposal(_proposalId);
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
+        uint256 _timeOfQueue = block.timestamp;
+        governor.queue(_proposalId);
+        uint256 _eta = governor.proposalEta(_proposalId);
+        assertEq(_eta, _timeOfQueue + timelock.delay());
+    }
+
+    function testFuzz_ReturnsZeroIfProposalEtaCalledWithInvalidProposalId(
+        uint256 _invalidProposalId
+    ) public view {
+        uint256 _eta = governor.proposalEta(_invalidProposalId);
+        assertEq(_eta, 0);
+    }
+}
+
+contract ProposalProposer is CompoundGovernorTest {
+    function testFuzz_ProposalProposerCorrectWithEnumeratedId(uint256) public {
+        address _proposerExpected = _getRandomProposer();
+        _addToAllowedProposers(_proposerExpected);
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposerExpected, _proposal);
+        address _proposer = governor.proposalProposer(_proposalId);
+        assertEq(_proposerExpected, _proposer);
+    }
+
+    function testFuzz_ReturnsZeroIfProposalProposerCalledWithInvalidProposalId(
+        uint256 _invalidProposalId
+    ) public view {
+        address _proposer = governor.proposalProposer(_invalidProposalId);
+        assertEq(_proposer, address(0));
+    }
+}
+
+contract ProposalNeedsQueueing is CompoundGovernorTest {
+    function testFuzz_ProposalNeedsQueuingCorrectWithEnumeratedId(
+        uint256
+    ) public {
+        address _proposerExpected = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposerExpected, _proposal);
+        bool _queuingNeeded = governor.proposalNeedsQueuing(_proposalId);
+        assertEq(_queuingNeeded, true);
+    }
+}
+
+contract State is CompoundGovernorTest {
+    function testFuzz_ReturnsCorrectStateWhenPending(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        vm.prank(_proposer);
+        uint256 _proposalId = governor.propose(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            _proposal.description
+        );
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Pending)
+        );
+    }
+
+    function testFuzz_ReturnsCorrectStateWhenActive(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Active)
+        );
+    }
+
+    function testFuzz_ReturnsCorrectStateWhenCanceled(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        vm.prank(_proposer);
+        uint256 _proposalId = governor.propose(
+            _proposal.targets,
+            _proposal.values,
+            _proposal.calldatas,
+            _proposal.description
+        );
+        vm.prank(_proposer);
+        governor.cancel(_proposalId);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Canceled)
+        );
+    }
+
+    function testFuzz_ReturnsCorrectStateWhenSucceeded(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        _passProposal(_proposalId);
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Succeeded)
+        );
+    }
+
+    function testFuzz_ReturnsCorrectStateWhenDefeated(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        _failProposal(_proposalId);
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Defeated)
+        );
+    }
+
+    function testFuzz_ReturnsCorrectStateWhenQueued(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        _passAndQueueProposal(_proposal, _proposalId);
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Queued)
+        );
+    }
+
+    function testFuzz_ReturnsCorrectStateWhenExecuted(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        _passQueueAndExecuteProposal(_proposal, _proposalId);
+        vm.roll(vm.getBlockNumber() + INITIAL_VOTING_PERIOD + 1);
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Executed)
+        );
+    }
+
+    function testFuzz_ReturnsCorrectStateWhenExpired(uint256) public {
+        address _proposer = _getRandomProposer();
+        Proposal memory _proposal = _buildAnEmptyProposal();
+        uint256 _proposalId = _submitProposal(_proposer, _proposal);
+        _passAndQueueProposal(_proposal, _proposalId);
+        vm.warp(
+            governor.proposalEta(_proposalId) + timelock.GRACE_PERIOD() + 1
+        );
+        assertEq(
+            uint8(governor.state(_proposalId)),
+            uint8(IGovernor.ProposalState.Expired)
+        );
+    }
+
+    function testFuzz_RevertIf_StateCalledWithInvalidProposalId(
+        uint256 _invalidProposalId
+    ) public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IGovernor.GovernorNonexistentProposal.selector,
+                _invalidProposalId
+            )
+        );
+        governor.state(_invalidProposalId);
+    }
+}
+
+contract UpgradeGovernor is CompoundGovernorConstants, CompoundGovernorTest {
+    function testFork_UpgradeCompoundGovernorImplementation() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+            ICompoundTimelock timelock
+        ) = _setupUpgradeTest();
+
+        CompoundGovernorTest.Proposal
+            memory upgradeProposal = _createUpgradeProposal(newGovernor);
+
+        // Submit the proposal through CompoundGovernor
+        address proposer = _majorDelegates[0]; // Use first major delegate
+        _whitelistProposerIfNeeded(governor, proposer);
+
+        uint256 _proposalId = _submitAndPassProposal(
+            governor,
+            upgradeProposal,
+            proposer
+        );
+        _executeProposal(governor, timelock, _proposalId);
+
+        // Verify the upgrade was successful by checking that the new implementation is active
+        // We can verify this by checking if the governor still functions correctly
+        bool isWhitelisted = governor.isWhitelisted(
+            0x6d903f6003cca6255D85CcA4D3B5E5146dC33925
+        );
+        assertFalse(isWhitelisted);
+    }
+
+    function testFork_UpgradeCompoundGovernoorStorageSafetyCheck() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+            ICompoundTimelock timelock
+        ) = _setupUpgradeTest();
+
+        CompoundGovernorTest.Proposal
+            memory upgradeProposal = _createUpgradeProposal(newGovernor);
+
+        // Submit the proposal through CompoundGovernor
+        address proposer = _majorDelegates[0]; // Use first major delegate
+        _whitelistProposerIfNeeded(governor, proposer);
+
+        uint256 _proposalId = _submitAndPassProposal(
+            governor,
+            upgradeProposal,
+            proposer
+        );
+
+        /*//////////////////////////////////////////////////////////////
+                                STORAGE BEFORE
+        //////////////////////////////////////////////////////////////*/
+        CompoundGovernorTest.StorageSnapshot
+            memory beforeSnapshot = _captureStorageSnapshot(governor);
+
+        // Execute proposal
+        _executeProposal(governor, timelock, _proposalId);
+
+        /*//////////////////////////////////////////////////////////////
+                                STORAGE AFTER
+        //////////////////////////////////////////////////////////////*/
+        _assertStorageConsistency(beforeSnapshot, governor);
+        _verifyBasicFunctionality(governor);
+    }
+
+    function testFork_UpgradeCompoundGovernorWithBatchWhitelist() public {
+        (
+            CompoundGovernor newGovernor,
+            CompoundGovernor governor,
+            ICompoundTimelock timelock
+        ) = _setupUpgradeTest();
+
+        // Get the current proposal guardian from the existing governor
+        (address _proposalGuardian, ) = governor.proposalGuardian();
+
+        // Prepare addresses for batchWhitelist call
+        // First address must be proposalGuardian
+        address[] memory _initProposers = new address[](5);
+        _initProposers[0] = _proposalGuardian; // proposalGuardian
+        _initProposers[1] = _majorDelegates[0]; // a16z
+        _initProposers[2] = _majorDelegates[1]; // Second major delegate
+        _initProposers[3] = _majorDelegates[2]; // Geoffrey Hayes
+        _initProposers[4] = _majorDelegates[3]; // Gauntlet
+
+        // Encode the batchWhitelist call data
+        bytes memory _batchWhitelistCalldata = abi.encodeWithSelector(
+            CompoundGovernor.batchWhitelist.selector,
+            _initProposers
+        );
+
+        // Create upgrade proposal with batchWhitelist call
+        address[] memory _targets = new address[](1);
+        _targets[0] = PROXY_ADMIN_ADDRESS;
+
+        uint256[] memory _values = new uint256[](1);
+        _values[0] = 0;
+
+        bytes[] memory _calldatas = new bytes[](1);
+        _calldatas[0] = abi.encodeWithSelector(
+            ProxyAdmin.upgradeAndCall.selector,
+            GOVERNOR_PROXY_ADDRESS,
+            address(newGovernor),
+            _batchWhitelistCalldata
+        );
+
+        CompoundGovernorTest.Proposal
+            memory upgradeProposal = CompoundGovernorTest.Proposal(
+                _targets,
+                _values,
+                _calldatas,
+                "Upgrade Governor with batchWhitelist initialization"
+            );
+
+        // Submit the proposal through CompoundGovernor
+        address proposer = _majorDelegates[0]; // Use first major delegate
+        _whitelistProposerIfNeeded(governor, proposer);
+
+        uint256 _proposalId = _submitAndPassProposal(
+            governor,
+            upgradeProposal,
+            proposer
+        );
+
+        // Execute proposal
+        _executeProposal(governor, timelock, _proposalId);
+
+        // Verify that the upgrade was successful and batchWhitelist was called
+        // Check that all addresses are properly set in the allowed proposers list
+        address[] memory allowedProposers = governor.getAllowedProposers();
+
+        // Should have exactly 5 allowed proposers
+        assertEq(
+            allowedProposers.length,
+            5,
+            "Should have exactly 5 allowed proposers"
+        );
+
+        // Verify each address is correctly set
+        assertEq(
+            allowedProposers[0],
+            _proposalGuardian,
+            "First address should be proposal guardian"
+        );
+        assertEq(
+            allowedProposers[1],
+            _majorDelegates[0],
+            "Second address should be a16z"
+        );
+        assertEq(
+            allowedProposers[2],
+            _majorDelegates[1],
+            "Third address should be second major delegate"
+        );
+        assertEq(
+            allowedProposers[3],
+            _majorDelegates[2],
+            "Fourth address should be Geoffrey Hayes"
+        );
+        assertEq(
+            allowedProposers[4],
+            _majorDelegates[3],
+            "Fifth address should be Gauntlet"
+        );
+
+        // Verify that all addresses are recognized as allowed proposers
+        for (uint256 i = 0; i < _initProposers.length; i++) {
+            assertTrue(
+                governor.isAllowedProposer(_initProposers[i]),
+                string(
+                    abi.encodePacked(
+                        "Address at index ",
+                        i,
+                        " should be an allowed proposer"
+                    )
+                )
+            );
+        }
+
+        // Verify that the proposal guardian is correctly set
+        (address currentProposalGuardian, ) = governor.proposalGuardian();
+        assertEq(
+            currentProposalGuardian,
+            _proposalGuardian,
+            "Proposal guardian should remain unchanged"
+        );
+
+        // Verify basic functionality still works
+        _verifyBasicFunctionality(governor);
+    }
+}
